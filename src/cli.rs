@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::index::manager::IndexManager;
 use crate::index::ops;
 use crate::index::schema::SchemaDef;
-use crate::search::{EsSearchRequest, EsQuery, search_index};
+use crate::search::{EsQuery, EsSearchRequest, search_index};
 
 #[derive(Parser)]
 #[command(name = "tantivy-cli")]
@@ -32,9 +32,7 @@ pub enum Commands {
     /// List all indexes
     ListIndexes,
     /// Delete an index
-    DeleteIndex {
-        name: String,
-    },
+    DeleteIndex { name: String },
     /// Add a document to an index
     AddDoc {
         index: String,
@@ -65,17 +63,11 @@ pub enum Commands {
         highlight: Vec<String>,
     },
     /// Show index stats
-    Stats {
-        index: String,
-    },
+    Stats { index: String },
     /// Rebuild (merge) index
-    Rebuild {
-        index: String,
-    },
+    Rebuild { index: String },
     /// Compress (commit) index
-    Compress {
-        index: String,
-    },
+    Compress { index: String },
     /// List documents in an index
     ListDocs {
         index: String,
@@ -121,12 +113,20 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             ops::commit_index(&handle).await?;
             println!("Document added: {}", id);
         }
-        Commands::GetDoc { index, field, value } => {
+        Commands::GetDoc {
+            index,
+            field,
+            value,
+        } => {
             let handle = manager.open_index(&index).await?;
             let doc = ops::get_document(&handle, Some(&field), &value).await?;
             println!("{}", serde_json::to_string_pretty(&doc)?);
         }
-        Commands::DeleteDoc { index, field, value } => {
+        Commands::DeleteDoc {
+            index,
+            field,
+            value,
+        } => {
             let handle = manager.open_index(&index).await?;
             let deleted = ops::delete_documents(&handle, &field, &value).await?;
             ops::commit_index(&handle).await?;
@@ -168,7 +168,11 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             ops::compress_index(&handle).await?;
             println!("Index '{}' compressed.", index);
         }
-        Commands::ListDocs { index, limit, offset } => {
+        Commands::ListDocs {
+            index,
+            limit,
+            offset,
+        } => {
             let handle = manager.open_index(&index).await?;
             let docs = ops::list_documents(&handle, limit, offset).await?;
             println!("{}", serde_json::to_string_pretty(&json!(docs))?);

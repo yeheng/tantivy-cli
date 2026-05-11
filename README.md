@@ -18,6 +18,7 @@ Supports dynamic index/schema creation, full CRUD for documents, **Elasticsearch
 - **Index Maintenance** — Stats, rebuild (merge segments), and compress operations.
 - **Dual Interface** — Use as a traditional CLI tool or run as an async HTTP server.
 - **Async I/O** — Powered by Tokio; all index operations are non-blocking.
+- **Auto Commit** — Server automatically commits pending writes every 30 seconds.
 
 ---
 
@@ -31,9 +32,23 @@ cargo build --release
 
 The binary is located at `./target/release/tantivy-cli`.
 
-### CLI Usage
+---
 
-#### 1. Create an index with a schema
+## CLI Usage
+
+### Global Options
+
+```bash
+tantivy-cli --index-dir /var/lib/tantivy <command>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--index-dir` | `./indexes` | Base directory for all indexes |
+
+### Index Management
+
+#### Create an index
 
 Create a file named `schema.json`:
 
@@ -52,21 +67,53 @@ Create a file named `schema.json`:
 }
 ```
 
-Then create the index:
-
 ```bash
 tantivy-cli create-index articles --schema-file schema.json
 ```
 
-#### 2. Add documents
+#### List indexes
 
 ```bash
-tantivy-cli add-doc articles --doc '{"id":"1","title":"Hello Tantivy","body":"A fast full-text search engine.","score":10}'
-
-tantivy-cli add-doc articles --doc '{"id":"2","title":"Rust Programming","body":"Rust is a systems language.","score":20}'
+tantivy-cli list-indexes
 ```
 
-#### 3. Search
+#### Delete an index
+
+```bash
+tantivy-cli delete-index articles
+```
+
+### Document Operations
+
+#### Add a document
+
+```bash
+tantivy-cli add-doc articles --doc '{"id":"1","title":"Hello Tantivy","body":"A fast full-text search engine.","price":10}'
+
+tantivy-cli add-doc articles --doc '{"id":"2","title":"Rust Programming","body":"Rust is a systems language.","price":20}'
+```
+
+#### Get a document
+
+```bash
+tantivy-cli get-doc articles id 1
+```
+
+#### List documents
+
+```bash
+tantivy-cli list-docs articles --limit 10 --offset 0
+```
+
+> **Note:** `offset + limit` cannot exceed `10,000`.
+
+#### Delete documents
+
+```bash
+tantivy-cli delete-doc articles id 1
+```
+
+### Search
 
 ```bash
 tantivy-cli search articles "tantivy" --limit 5
@@ -78,19 +125,7 @@ Search with **highlighted snippets**:
 tantivy-cli search articles "systems language" --highlight title --highlight body
 ```
 
-#### 4. Get a document
-
-```bash
-tantivy-cli get-doc articles id 1
-```
-
-#### 5. Delete a document
-
-```bash
-tantivy-cli delete-doc articles id 1
-```
-
-#### 6. Index maintenance
+### Index Maintenance
 
 ```bash
 # Show stats
@@ -103,12 +138,6 @@ tantivy-cli rebuild articles
 tantivy-cli compress articles
 ```
 
-#### 7. List indexes
-
-```bash
-tantivy-cli list-indexes
-```
-
 ---
 
 ## HTTP Server
@@ -119,9 +148,9 @@ Start the server:
 tantivy-cli serve --bind 127.0.0.1:3000
 ```
 
-### HTTP API Reference
-
 All endpoints return JSON. Errors are returned with appropriate HTTP status codes and an `{ "error": "..." }` body.
+
+### Index Management
 
 #### Create an Index
 
@@ -132,14 +161,14 @@ curl -X POST http://127.0.0.1:3000/indexes/articles \
     "schema": {
       "fields": [
         { "name": "id",    "kind": "string", "stored": true, "indexed": true, "fast": true },
-        { "name": "title", "kind": "text",   "stored": true, "indexed": false, "fast": false },
-        { "name": "body",  "kind": "text",   "stored": true, "indexed": false, "fast": false }
+        { "name": "title", "kind": "text",   "stored": true, "indexed": true, "fast": false },
+        { "name": "body",  "kind": "text",   "stored": true, "indexed": true, "fast": false }
       ]
     }
   }'
 ```
 
-**Response:**
+**Response:** `201 Created`
 
 ```json
 { "index": "articles" }
@@ -179,6 +208,10 @@ curl http://127.0.0.1:3000/indexes/articles
 curl -X DELETE http://127.0.0.1:3000/indexes/articles
 ```
 
+**Response:** `204 No Content`
+
+### Document Operations
+
 #### Add a Document
 
 ```bash
@@ -199,6 +232,8 @@ curl -X POST http://127.0.0.1:3000/indexes/articles/docs \
 curl "http://127.0.0.1:3000/indexes/articles/docs?limit=10&offset=0"
 ```
 
+> **Note:** `offset + limit` cannot exceed `10,000`.
+
 #### Get a Document
 
 ```bash
@@ -217,17 +252,23 @@ curl -X DELETE http://127.0.0.1:3000/indexes/articles/docs/id/1
 { "deleted": 1 }
 ```
 
-#### Search
+### Search
 
 The search endpoint supports an **Elasticsearch-style Query DSL** via POST, as well as a simple GET interface.
 
-**GET (simple query string):**
+#### GET (simple query string)
 
 ```bash
 curl "http://127.0.0.1:3000/indexes/articles/search?q=hello&limit=5&offset=0"
 ```
 
-**POST (ES-style JSON DSL):**
+With highlighting:
+
+```bash
+curl "http://127.0.0.1:3000/indexes/articles/search?q=hello&highlight=title&highlight=body&snippet_max_chars=150"
+```
+
+#### POST (ES-style JSON DSL)
 
 ##### 1. Simple full-text query (`query_string`)
 
@@ -398,6 +439,8 @@ curl -X POST http://127.0.0.1:3000/indexes/articles/search \
 ```
 
 > **Note:** The POST body also accepts the legacy field names `limit` and `offset` as aliases for `size` and `from`.
+
+### Index Maintenance
 
 #### Index Stats
 

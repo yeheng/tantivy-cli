@@ -23,7 +23,10 @@ fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
 /// Commands sent to the per-index writer actor.
 pub enum IndexCommand {
     AddDoc(TantivyDocument, tokio::sync::oneshot::Sender<Result<()>>),
-    DeleteTerm(tantivy::schema::Term, tokio::sync::oneshot::Sender<Result<()>>),
+    DeleteTerm(
+        tantivy::schema::Term,
+        tokio::sync::oneshot::Sender<Result<()>>,
+    ),
     Commit(tokio::sync::oneshot::Sender<Result<()>>),
     Rebuild(tokio::sync::oneshot::Sender<Result<()>>),
     CleanupExpired(
@@ -61,7 +64,11 @@ impl IndexManager {
         })
     }
 
-    pub async fn create_index(&self, name: &str, schema_def: &SchemaDef) -> Result<Arc<IndexHandle>> {
+    pub async fn create_index(
+        &self,
+        name: &str,
+        schema_def: &SchemaDef,
+    ) -> Result<Arc<IndexHandle>> {
         if self.indexes.contains_key(name) {
             return Err(AppError::IndexAlreadyExists(name.to_string()));
         }
@@ -193,7 +200,10 @@ fn spawn_writer_actor(index: Index) -> mpsc::Sender<IndexCommand> {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 IndexCommand::AddDoc(doc, reply) => {
-                    let res = writer.add_document(doc).map(|_| ()).map_err(|e| AppError::Tantivy(e));
+                    let res = writer
+                        .add_document(doc)
+                        .map(|_| ())
+                        .map_err(AppError::Tantivy);
                     if res.is_ok() {
                         dirty = true;
                     }
@@ -206,7 +216,7 @@ fn spawn_writer_actor(index: Index) -> mpsc::Sender<IndexCommand> {
                 }
                 IndexCommand::Commit(reply) => {
                     if dirty {
-                        let res = writer.commit().map(|_| ()).map_err(|e| AppError::Tantivy(e));
+                        let res = writer.commit().map(|_| ()).map_err(AppError::Tantivy);
                         dirty = false;
                         let _ = reply.send(res);
                     } else {

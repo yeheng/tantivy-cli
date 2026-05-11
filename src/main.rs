@@ -7,7 +7,7 @@ mod server;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::cli::{run_cli, Cli};
+use crate::cli::{Cli, run_cli};
 use crate::index::manager::IndexManager;
 
 #[tokio::main]

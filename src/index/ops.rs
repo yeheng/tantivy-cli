@@ -3,9 +3,9 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tantivy::{
+    DocAddress, TantivyDocument,
     query::{RangeQuery, TermQuery},
     schema::{IndexRecordOption, OwnedValue, Term},
-    DocAddress, TantivyDocument,
 };
 
 use crate::error::{AppError, Result};
@@ -40,26 +40,26 @@ fn json_value_to_owned_value(
                 .ok_or_else(|| AppError::Schema("expected string".to_string()))?
                 .to_string(),
         )),
-        tantivy::schema::FieldType::U64(_) => Ok(OwnedValue::U64(
-            value
-                .as_u64()
-                .ok_or_else(|| AppError::Schema("expected u64".to_string()))?,
-        )),
-        tantivy::schema::FieldType::I64(_) => Ok(OwnedValue::I64(
-            value
-                .as_i64()
-                .ok_or_else(|| AppError::Schema("expected i64".to_string()))?,
-        )),
-        tantivy::schema::FieldType::F64(_) => Ok(OwnedValue::F64(
-            value
-                .as_f64()
-                .ok_or_else(|| AppError::Schema("expected f64".to_string()))?,
-        )),
-        tantivy::schema::FieldType::Bool(_) => Ok(OwnedValue::Bool(
-            value
-                .as_bool()
-                .ok_or_else(|| AppError::Schema("expected bool".to_string()))?,
-        )),
+        tantivy::schema::FieldType::U64(_) => {
+            Ok(OwnedValue::U64(value.as_u64().ok_or_else(|| {
+                AppError::Schema("expected u64".to_string())
+            })?))
+        }
+        tantivy::schema::FieldType::I64(_) => {
+            Ok(OwnedValue::I64(value.as_i64().ok_or_else(|| {
+                AppError::Schema("expected i64".to_string())
+            })?))
+        }
+        tantivy::schema::FieldType::F64(_) => {
+            Ok(OwnedValue::F64(value.as_f64().ok_or_else(|| {
+                AppError::Schema("expected f64".to_string())
+            })?))
+        }
+        tantivy::schema::FieldType::Bool(_) => {
+            Ok(OwnedValue::Bool(value.as_bool().ok_or_else(|| {
+                AppError::Schema("expected bool".to_string())
+            })?))
+        }
         tantivy::schema::FieldType::Date(_) => {
             let s = value
                 .as_str()
@@ -225,7 +225,11 @@ pub async fn delete_documents(
             let v = term_value.parse::<bool>()?;
             Term::from_field_bool(field, v)
         }
-        _ => return Err(AppError::Schema("unsupported delete field type".to_string())),
+        _ => {
+            return Err(AppError::Schema(
+                "unsupported delete field type".to_string(),
+            ));
+        }
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -269,17 +273,19 @@ pub async fn get_document(
         let field_entry = handle.schema.get_field_entry(field);
         let term = match field_entry.field_type() {
             tantivy::schema::FieldType::Str(_) => Term::from_field_text(field, term_value),
-            tantivy::schema::FieldType::U64(_) => {
-                Term::from_field_u64(field, term_value.parse()?)
+            tantivy::schema::FieldType::U64(_) => Term::from_field_u64(field, term_value.parse()?),
+            tantivy::schema::FieldType::I64(_) => Term::from_field_i64(field, term_value.parse()?),
+            _ => {
+                return Err(AppError::Schema(
+                    "unsupported lookup field type".to_string(),
+                ));
             }
-            tantivy::schema::FieldType::I64(_) => {
-                Term::from_field_i64(field, term_value.parse()?)
-            }
-            _ => return Err(AppError::Schema("unsupported lookup field type".to_string())),
         };
         let query = TermQuery::new(term, IndexRecordOption::Basic);
-        let top_docs: Vec<(f32, tantivy::DocAddress)> = searcher
-            .search(&query, &tantivy::collector::TopDocs::with_limit(1).order_by_score())?;
+        let top_docs: Vec<(f32, tantivy::DocAddress)> = searcher.search(
+            &query,
+            &tantivy::collector::TopDocs::with_limit(1).order_by_score(),
+        )?;
         if let Some((_, doc_address)) = top_docs.into_iter().next() {
             searcher.doc::<TantivyDocument>(doc_address)?
         } else {
@@ -391,10 +397,8 @@ pub async fn list_documents(
                 seen += 1;
                 continue;
             }
-            let doc = searcher.doc::<TantivyDocument>(DocAddress::new(
-                segment_ord as u32,
-                doc_id,
-            ))?;
+            let doc =
+                searcher.doc::<TantivyDocument>(DocAddress::new(segment_ord as u32, doc_id))?;
             docs.push(doc_to_json(&handle.schema, &doc));
             seen += 1;
         }

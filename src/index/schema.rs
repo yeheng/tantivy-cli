@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tantivy::schema::{
-    BytesOptions, DateOptions, FacetOptions, JsonObjectOptions, NumericOptions, Schema,
-    SchemaBuilder, FAST, STORED, STRING, TEXT,
+    BytesOptions, DateOptions, FAST, FacetOptions, JsonObjectOptions, NumericOptions, STORED,
+    STRING, Schema, SchemaBuilder, TEXT,
 };
 
 use crate::error::Result;
@@ -145,8 +145,9 @@ impl FieldDef {
                 }
                 if self.indexed {
                     opts = opts.set_indexing_options(
-                        tantivy::schema::TextFieldIndexing::default()
-                            .set_index_option(tantivy::schema::IndexRecordOption::WithFreqsAndPositions),
+                        tantivy::schema::TextFieldIndexing::default().set_index_option(
+                            tantivy::schema::IndexRecordOption::WithFreqsAndPositions,
+                        ),
                     );
                 }
                 if self.fast {
