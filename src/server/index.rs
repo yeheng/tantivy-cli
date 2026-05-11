@@ -30,7 +30,10 @@ pub async fn create_index(
     Json(req): Json<CreateIndexReq>,
 ) -> Result<impl IntoResponse> {
     state.manager.create_index(&name, &req.schema).await?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "index": name }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "index": name })),
+    ))
 }
 
 pub async fn list_indexes(State(state): State<AppState>) -> Result<Json<Vec<String>>> {

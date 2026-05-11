@@ -1,6 +1,6 @@
 use serde_json::Value as JsonValue;
-use tantivy::schema::{FieldType, IndexRecordOption, Term};
 use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery};
+use tantivy::schema::{FieldType, IndexRecordOption, Term};
 
 use crate::error::{AppError, Result};
 use crate::index::manager::IndexHandle;
@@ -54,7 +54,9 @@ pub fn json_value_to_term(
                 tantivy::DateTime::from_timestamp_secs(dt.timestamp()),
             ))
         }
-        _ => Err(AppError::Schema("unsupported filter field type".to_string())),
+        _ => Err(AppError::Schema(
+            "unsupported filter field type".to_string(),
+        )),
     }
 }
 
@@ -125,7 +127,9 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
                 (None, Some(v)) => std::ops::Bound::Excluded(json_value_to_term(field, v, ft)?),
                 (None, None) => std::ops::Bound::Unbounded,
                 (Some(_), Some(_)) => {
-                    return Err(AppError::Query("cannot specify both gte and gt".to_string()))
+                    return Err(AppError::Query(
+                        "cannot specify both gte and gt".to_string(),
+                    ));
                 }
             };
             let upper = match (&params.lte, &params.lt) {
@@ -133,7 +137,9 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
                 (None, Some(v)) => std::ops::Bound::Excluded(json_value_to_term(field, v, ft)?),
                 (None, None) => std::ops::Bound::Unbounded,
                 (Some(_), Some(_)) => {
-                    return Err(AppError::Query("cannot specify both lte and lt".to_string()))
+                    return Err(AppError::Query(
+                        "cannot specify both lte and lt".to_string(),
+                    ));
                 }
             };
             Ok(Box::new(RangeQuery::new(lower, upper)))

@@ -64,15 +64,30 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
                 .delete(index::delete_index)
                 .get(index::get_index_info),
         )
-        .route("/indexes/{name}/docs", axum::routing::post(docs::add_doc).get(docs::list_docs))
+        .route(
+            "/indexes/{name}/docs",
+            axum::routing::post(docs::add_doc).get(docs::list_docs),
+        )
         .route(
             "/indexes/{name}/docs/{field}/{value}",
             axum::routing::get(docs::get_doc).delete(docs::delete_doc),
         )
-        .route("/indexes/{name}/search", axum::routing::get(search::search).post(search::search_post))
-        .route("/indexes/{name}/stats", axum::routing::get(maintenance::index_stats))
-        .route("/indexes/{name}/rebuild", axum::routing::post(maintenance::rebuild_index))
-        .route("/indexes/{name}/compress", axum::routing::post(maintenance::compress_index))
+        .route(
+            "/indexes/{name}/search",
+            axum::routing::get(search::search).post(search::search_post),
+        )
+        .route(
+            "/indexes/{name}/stats",
+            axum::routing::get(maintenance::index_stats),
+        )
+        .route(
+            "/indexes/{name}/rebuild",
+            axum::routing::post(maintenance::rebuild_index),
+        )
+        .route(
+            "/indexes/{name}/compress",
+            axum::routing::post(maintenance::compress_index),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

@@ -1,6 +1,6 @@
 use serde_json::Value as JsonValue;
-use tantivy::{DocAddress, TantivyDocument};
 use tantivy::snippet::SnippetGenerator;
+use tantivy::{DocAddress, TantivyDocument};
 
 use crate::error::Result;
 use crate::index::manager::IndexHandle;

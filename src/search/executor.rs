@@ -1,15 +1,15 @@
-use tantivy::{
-    collector::{Count, MultiCollector, TopDocs},
-    Order,
-};
 use tantivy::aggregation::{AggContextParams, AggregationCollector};
 use tantivy::schema::FieldType;
+use tantivy::{
+    Order,
+    collector::{Count, MultiCollector, TopDocs},
+};
 
 use crate::error::{AppError, Result};
 use crate::index::manager::IndexHandle;
 use crate::search::compiler::build_final_query;
 use crate::search::model::{EsQuery, EsSearchRequest, SearchResponse};
-use crate::search::result::{build_snippet_gens, process_top_docs, TopDocsResult};
+use crate::search::result::{TopDocsResult, build_snippet_gens, process_top_docs};
 
 fn run_search<C, R>(
     handle: &IndexHandle,
@@ -19,7 +19,11 @@ fn run_search<C, R>(
     snippet_gens: &[(String, tantivy::snippet::SnippetGenerator)],
     top_collector: C,
     aggs: Option<&tantivy::aggregation::agg_req::Aggregations>,
-) -> Result<(usize, Vec<crate::search::model::SearchHit>, Option<serde_json::Value>)>
+) -> Result<(
+    usize,
+    Vec<crate::search::model::SearchHit>,
+    Option<serde_json::Value>,
+)>
 where
     C: tantivy::collector::Collector<Fruit = Vec<R>>,
     R: TopDocsResult + Send + 'static,
@@ -51,10 +55,7 @@ where
     }
 }
 
-pub async fn search_index(
-    handle: &IndexHandle,
-    req: &EsSearchRequest,
-) -> Result<SearchResponse> {
+pub async fn search_index(handle: &IndexHandle, req: &EsSearchRequest) -> Result<SearchResponse> {
     let searcher = handle.reader.searcher();
     let query = build_final_query(handle, req)?;
     let snippet_gens = build_snippet_gens(handle, &searcher, &*query, req)?;
@@ -139,7 +140,7 @@ pub async fn search_index(
                     return Err(AppError::BadRequest(format!(
                         "unsupported sort field type for '{}'",
                         field_name
-                    )))
+                    )));
                 }
             }
         }
