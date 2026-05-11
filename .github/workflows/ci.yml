@@ -39,14 +39,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       
-      # - name: Check formatting
-      #   run: cd tantivy-cli && cargo fmt --all -- --check
+      - name: Check formatting
+        run: cd tantivy-cli && cargo fmt --all -- --check
       
-      # - name: Run clippy
-      #   run: cd tantivy-cli && cargo clippy --all-features -- -D warnings
+      - name: Run clippy
+        run: cd tantivy-cli && cargo clippy --all-features -- -D warnings
       
       - name: Run tests
-        run: cd tantivy-cli && cargo test --all-features
+        run: cargo test
 
   build:
     name: Build
