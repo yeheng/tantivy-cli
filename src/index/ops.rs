@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::ops::Bound;
+
 use tantivy::{
-    query::{AllQuery, TermQuery},
+    query::{AllQuery, RangeQuery, TermQuery},
     schema::{IndexRecordOption, OwnedValue, Term},
     TantivyDocument,
 };
@@ -336,6 +338,35 @@ pub async fn compress_index(handle: &IndexHandle) -> Result<()> {
     })
     .await
     .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
+    Ok(())
+}
+
+/// Delete documents whose `expired_at` timestamp is earlier than now.
+/// If the index does not have an `expired_at` date field, this is a no-op.
+pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
+    let field = match handle.expired_at_field {
+        Some(f) => f,
+        None => return Ok(()),
+    };
+
+    let now = tantivy::DateTime::from_timestamp_secs(chrono::Utc::now().timestamp());
+    let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
+    let query = RangeQuery::new(Bound::Unbounded, upper);
+
+    let writer = handle.writer.clone();
+    spawn_blocking(move || {
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async move {
+            let mut w = writer.write().await;
+            w.delete_query(Box::new(query))?;
+            w.commit()?;
+            Ok::<_, AppError>(())
+        })
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
+
+    tracing::info!(index = %handle.name, "cleaned up expired documents");
     Ok(())
 }
 

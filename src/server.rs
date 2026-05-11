@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,24 @@ pub struct AppState {
 }
 
 pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
+    // Start background task to periodically clean up expired documents.
+    let cleanup_manager = manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let handles = cleanup_manager.iter_handles();
+            for handle in handles {
+                if handle.expired_at_field.is_some() {
+                    if let Err(e) = ops::cleanup_expired(&handle).await {
+                        tracing::error!(index = %handle.name, error = %e, "failed to cleanup expired documents");
+                    }
+                }
+            }
+        }
+    });
+
     let state = AppState { manager };
 
     let app = Router::new()

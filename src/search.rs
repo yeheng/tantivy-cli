@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tantivy::{
-    collector::TopDocs,
+    collector::{Count, MultiCollector, TopDocs},
     query::QueryParser,
     snippet::SnippetGenerator,
     DocAddress, TantivyDocument,
@@ -44,6 +44,8 @@ pub struct SearchResponse {
     pub total: usize,
     pub hits: Vec<SearchHit>,
     pub query: String,
+    pub limit: usize,
+    pub offset: usize,
 }
 
 pub async fn search_index(handle: &IndexHandle, req: &SearchRequest) -> Result<SearchResponse> {
@@ -66,8 +68,12 @@ pub async fn search_index(handle: &IndexHandle, req: &SearchRequest) -> Result<S
         .map_err(|e| AppError::Query(e.to_string()))?;
 
     let top_collector = TopDocs::with_limit(req.limit + req.offset).order_by_score();
-    let top_docs: Vec<(f32, DocAddress)> = searcher.search(&query, &top_collector)?;
-    let total = top_docs.len();
+    let mut collectors = MultiCollector::new();
+    let top_docs_handle = collectors.add_collector(top_collector);
+    let count_handle = collectors.add_collector(Count);
+    let mut multi_fruit = searcher.search(&query, &collectors)?;
+    let total = count_handle.extract(&mut multi_fruit);
+    let top_docs: Vec<(f32, DocAddress)> = top_docs_handle.extract(&mut multi_fruit);
 
     let mut hits = Vec::with_capacity(top_docs.len().saturating_sub(req.offset));
 
@@ -117,5 +123,7 @@ pub async fn search_index(handle: &IndexHandle, req: &SearchRequest) -> Result<S
         total,
         hits,
         query: req.query.clone(),
+        limit: req.limit,
+        offset: req.offset,
     })
 }

@@ -2,12 +2,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tantivy::schema::Schema;
+use tantivy::schema::{Field, FieldType, Schema};
 use tantivy::{Index, IndexBuilder, IndexReader, IndexWriter, ReloadPolicy};
 use tokio::sync::RwLock;
 
 use crate::error::{AppError, Result};
 use crate::index::schema::SchemaDef;
+
+fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
+    schema.get_field("expired_at").ok().and_then(|field| {
+        let entry = schema.get_field_entry(field);
+        if matches!(entry.field_type(), FieldType::Date(_)) {
+            Some(field)
+        } else {
+            None
+        }
+    })
+}
 
 /// Holds an opened index together with its writer and reader.
 pub struct IndexHandle {
@@ -17,7 +28,8 @@ pub struct IndexHandle {
     pub reader: IndexReader,
     /// Writer is behind RwLock because tantivy::IndexWriter is not Send in some versions.
     pub writer: Arc<RwLock<IndexWriter>>,
-    pub path: PathBuf,
+    /// If the schema contains an `expired_at` date field, document expiration is enabled.
+    pub expired_at_field: Option<Field>,
 }
 
 /// Manages multiple indexes dynamically.
@@ -35,10 +47,6 @@ impl IndexManager {
             base_dir,
             indexes: DashMap::new(),
         })
-    }
-
-    pub fn base_dir(&self) -> &Path {
-        &self.base_dir
     }
 
     pub async fn create_index(&self, name: &str, schema_def: &SchemaDef) -> Result<Arc<IndexHandle>> {
@@ -70,7 +78,7 @@ impl IndexManager {
             schema: schema.clone(),
             reader,
             writer: Arc::new(RwLock::new(writer)),
-            path: index_dir,
+            expired_at_field: resolve_expired_at_field(&schema),
         });
 
         self.indexes.insert(name.to_string(), handle.clone());
@@ -102,18 +110,11 @@ impl IndexManager {
             schema: schema.clone(),
             reader,
             writer: Arc::new(RwLock::new(writer)),
-            path: index_dir,
+            expired_at_field: resolve_expired_at_field(&schema),
         });
 
         self.indexes.insert(name.to_string(), handle.clone());
         Ok(handle)
-    }
-
-    pub fn get_index(&self, name: &str) -> Result<Arc<IndexHandle>> {
-        self.indexes
-            .get(name)
-            .map(|h| h.clone())
-            .ok_or_else(|| AppError::IndexNotFound(name.to_string()))
     }
 
     pub async fn delete_index(&self, name: &str) -> Result<()> {
@@ -129,8 +130,8 @@ impl IndexManager {
         self.indexes.iter().map(|e| e.key().clone()).collect()
     }
 
-    pub fn index_exists(&self, name: &str) -> bool {
-        self.base_dir.join(name).exists()
+    pub fn iter_handles(&self) -> Vec<Arc<IndexHandle>> {
+        self.indexes.iter().map(|e| e.value().clone()).collect()
     }
 
     pub fn load_all_indexes(&self) -> Result<Vec<String>> {
@@ -151,10 +152,10 @@ impl IndexManager {
                         let handle = Arc::new(IndexHandle {
                             name: name.clone(),
                             index,
-                            schema,
+                            schema: schema.clone(),
                             reader,
                             writer: Arc::new(RwLock::new(writer)),
-                            path,
+                            expired_at_field: resolve_expired_at_field(&schema),
                         });
                         self.indexes.insert(name.clone(), handle);
                         loaded.push(name);
