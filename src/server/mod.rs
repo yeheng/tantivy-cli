@@ -17,7 +17,10 @@ pub struct AppState {
 }
 
 pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
-    // Start background task to periodically commit indexes (only if dirty).
+    // Start background task to periodically commit indexes.
+    // Note: `ops::commit_index` delegates to the per-index writer actor, which
+    // tracks a `dirty` flag and only performs an actual Tantivy commit when
+    // there are pending changes. Idle indexes produce zero disk I/O.
     let commit_manager = manager.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));

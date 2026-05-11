@@ -382,26 +382,24 @@ pub async fn list_documents(
     }
 
     let searcher = handle.reader.searcher();
-    let mut docs = Vec::with_capacity(limit);
-    let mut seen = 0usize;
 
-    for (segment_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
-        if docs.len() >= limit {
-            break;
-        }
-        for doc_id in segment_reader.doc_ids_alive() {
-            if docs.len() >= limit {
-                break;
-            }
-            if seen < offset {
-                seen += 1;
-                continue;
-            }
-            let doc =
-                searcher.doc::<TantivyDocument>(DocAddress::new(segment_ord as u32, doc_id))?;
-            docs.push(doc_to_json(&handle.schema, &doc));
-            seen += 1;
-        }
+    let doc_addresses: Vec<DocAddress> = searcher
+        .segment_readers()
+        .iter()
+        .enumerate()
+        .flat_map(|(segment_ord, segment_reader)| {
+            segment_reader
+                .doc_ids_alive()
+                .map(move |doc_id| DocAddress::new(segment_ord as u32, doc_id))
+        })
+        .skip(offset)
+        .take(limit)
+        .collect();
+
+    let mut docs = Vec::with_capacity(doc_addresses.len());
+    for doc_address in doc_addresses {
+        let doc = searcher.doc::<TantivyDocument>(doc_address)?;
+        docs.push(doc_to_json(&handle.schema, &doc));
     }
     Ok(docs)
 }

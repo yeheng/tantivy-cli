@@ -100,72 +100,41 @@ pub async fn search_index(
                 )));
             }
             let order: Order = (*order).into();
+            macro_rules! execute_sort {
+                ($collector:expr) => {{
+                    run_search(
+                        handle,
+                        &searcher,
+                        &*query,
+                        req,
+                        &snippet_gens,
+                        $collector,
+                        req.aggs.as_ref(),
+                    )?
+                }};
+            }
+
             match entry.field_type() {
-                FieldType::U64(_) => {
-                    let collector = TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<u64>(field_name, order);
-                    run_search(
-                        handle,
-                        &searcher,
-                        &*query,
-                        req,
-                        &snippet_gens,
-                        collector,
-                        req.aggs.as_ref(),
-                    )?
-                }
-                FieldType::I64(_) => {
-                    let collector = TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<i64>(field_name, order);
-                    run_search(
-                        handle,
-                        &searcher,
-                        &*query,
-                        req,
-                        &snippet_gens,
-                        collector,
-                        req.aggs.as_ref(),
-                    )?
-                }
-                FieldType::F64(_) => {
-                    let collector = TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<f64>(field_name, order);
-                    run_search(
-                        handle,
-                        &searcher,
-                        &*query,
-                        req,
-                        &snippet_gens,
-                        collector,
-                        req.aggs.as_ref(),
-                    )?
-                }
-                FieldType::Date(_) => {
-                    let collector = TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<tantivy::DateTime>(field_name, order);
-                    run_search(
-                        handle,
-                        &searcher,
-                        &*query,
-                        req,
-                        &snippet_gens,
-                        collector,
-                        req.aggs.as_ref(),
-                    )?
-                }
-                FieldType::Str(_) => {
-                    let collector = TopDocs::with_limit(req.size + req.from)
-                        .order_by_string_fast_field(field_name, order);
-                    run_search(
-                        handle,
-                        &searcher,
-                        &*query,
-                        req,
-                        &snippet_gens,
-                        collector,
-                        req.aggs.as_ref(),
-                    )?
-                }
+                FieldType::U64(_) => execute_sort!(
+                    TopDocs::with_limit(req.size + req.from)
+                        .order_by_fast_field::<u64>(field_name, order)
+                ),
+                FieldType::I64(_) => execute_sort!(
+                    TopDocs::with_limit(req.size + req.from)
+                        .order_by_fast_field::<i64>(field_name, order)
+                ),
+                FieldType::F64(_) => execute_sort!(
+                    TopDocs::with_limit(req.size + req.from)
+                        .order_by_fast_field::<f64>(field_name, order)
+                ),
+                FieldType::Date(_) => execute_sort!(
+                    TopDocs::with_limit(req.size + req.from)
+                        .order_by_fast_field::<tantivy::DateTime>(field_name, order)
+                ),
+                FieldType::Str(_) => execute_sort!(
+                    TopDocs::with_limit(req.size + req.from)
+                        .order_by_string_fast_field(field_name, order)
+                ),
                 _ => {
                     return Err(AppError::BadRequest(format!(
                         "unsupported sort field type for '{}'",
