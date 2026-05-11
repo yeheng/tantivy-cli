@@ -4,7 +4,6 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tantivy::schema::{Field, FieldType, Schema};
 use tantivy::{Index, IndexBuilder, IndexReader, IndexWriter, ReloadPolicy};
-use tokio::sync::RwLock;
 
 use crate::error::{AppError, Result};
 use crate::index::schema::SchemaDef;
@@ -26,8 +25,8 @@ pub struct IndexHandle {
     pub index: Index,
     pub schema: Schema,
     pub reader: IndexReader,
-    /// Writer is behind RwLock because tantivy::IndexWriter is not Send in some versions.
-    pub writer: Arc<RwLock<IndexWriter>>,
+    /// Writer is lazily initialized inside a std::sync::Mutex<Option<...>>.
+    pub writer: Arc<std::sync::Mutex<Option<IndexWriter>>>,
     /// If the schema contains an `expired_at` date field, document expiration is enabled.
     pub expired_at_field: Option<Field>,
 }
@@ -70,14 +69,12 @@ impl IndexManager {
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
 
-        let writer = index.writer::<tantivy::TantivyDocument>(50_000_000)?;
-
         let handle = Arc::new(IndexHandle {
             name: name.to_string(),
             index,
             schema: schema.clone(),
             reader,
-            writer: Arc::new(RwLock::new(writer)),
+            writer: Arc::new(std::sync::Mutex::new(None)),
             expired_at_field: resolve_expired_at_field(&schema),
         });
 
@@ -102,14 +99,12 @@ impl IndexManager {
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
 
-        let writer = index.writer::<tantivy::TantivyDocument>(50_000_000)?;
-
         let handle = Arc::new(IndexHandle {
             name: name.to_string(),
             index,
             schema: schema.clone(),
             reader,
-            writer: Arc::new(RwLock::new(writer)),
+            writer: Arc::new(std::sync::Mutex::new(None)),
             expired_at_field: resolve_expired_at_field(&schema),
         });
 
@@ -148,13 +143,12 @@ impl IndexManager {
                             .reader_builder()
                             .reload_policy(ReloadPolicy::OnCommitWithDelay)
                             .try_into()?;
-                        let writer = index.writer::<tantivy::TantivyDocument>(50_000_000)?;
                         let handle = Arc::new(IndexHandle {
                             name: name.clone(),
                             index,
                             schema: schema.clone(),
                             reader,
-                            writer: Arc::new(RwLock::new(writer)),
+                            writer: Arc::new(std::sync::Mutex::new(None)),
                             expired_at_field: resolve_expired_at_field(&schema),
                         });
                         self.indexes.insert(name.clone(), handle);

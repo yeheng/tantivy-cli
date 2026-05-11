@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::index::manager::IndexManager;
 use crate::index::ops;
 use crate::index::schema::SchemaDef;
-use crate::search::{search_index, SearchRequest, SearchResponse};
+use crate::search::{search_index, EsSearchRequest, EsQuery, SearchResponse};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,6 +22,25 @@ pub struct AppState {
 }
 
 pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
+    // Start background task to periodically commit indexes.
+    let commit_manager = manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let handles = commit_manager.iter_handles();
+            for handle in handles {
+                let has_writer = handle.writer.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+                if has_writer {
+                    if let Err(e) = ops::commit_index(&handle).await {
+                        tracing::error!(index = %handle.name, error = %e, "failed to commit index");
+                    }
+                }
+            }
+        }
+    });
+
     // Start background task to periodically clean up expired documents.
     let cleanup_manager = manager.clone();
     tokio::spawn(async move {
@@ -186,12 +205,15 @@ async fn search(
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>> {
     let handle = state.manager.open_index(&name).await?;
-    let req = SearchRequest {
-        query: q.q,
-        limit: q.limit,
-        offset: q.offset,
+    let req = EsSearchRequest {
+        from: q.offset,
+        size: q.limit,
+        query: Some(EsQuery::QueryString { query: q.q }),
+        sort: Vec::new(),
+        aggs: None,
         highlight_fields: q.highlight,
         snippet_max_chars: q.snippet_max_chars,
+        _source: None,
     };
     let resp = search_index(&handle, &req).await?;
     Ok(Json(resp))
@@ -200,7 +222,7 @@ async fn search(
 async fn search_post(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(req): Json<SearchRequest>,
+    Json(req): Json<EsSearchRequest>,
 ) -> Result<Json<SearchResponse>> {
     let handle = state.manager.open_index(&name).await?;
     let resp = search_index(&handle, &req).await?;

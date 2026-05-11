@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use std::ops::Bound;
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use tantivy::{
     query::{AllQuery, RangeQuery, TermQuery},
     schema::{IndexRecordOption, OwnedValue, Term},
@@ -176,21 +176,33 @@ pub fn doc_to_json(schema: &tantivy::schema::Schema, doc: &TantivyDocument) -> J
     JsonValue::Object(map)
 }
 
-/// Add or update a document.
+/// Lazily initialize the IndexWriter for a handle.
+fn ensure_writer_init(
+    index: &tantivy::Index,
+    writer_mutex: &std::sync::Mutex<Option<tantivy::IndexWriter>>,
+) -> Result<()> {
+    let mut guard = writer_mutex.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        let w = index.writer::<tantivy::TantivyDocument>(15_000_000)?;
+        *guard = Some(w);
+    }
+    Ok(())
+}
+
+/// Add or update a document (does NOT commit).
 pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<String> {
     let schema = handle.schema.clone();
     let doc = json_to_doc(&schema, doc_json)?;
 
-    let writer = handle.writer.clone();
+    let index = handle.index.clone();
+    let writer_arc = handle.writer.clone();
     let doc_clone = doc.clone();
     spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mut w = writer.write().await;
-            w.add_document(doc_clone)?;
-            w.commit()?;
-            Ok::<_, AppError>(())
-        })
+        ensure_writer_init(&index, &writer_arc)?;
+        let mut guard = writer_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let w = guard.as_mut().unwrap();
+        w.add_document(doc_clone)?;
+        Ok::<_, AppError>(())
     })
     .await
     .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
@@ -203,7 +215,7 @@ pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<
     Ok(id)
 }
 
-/// Delete documents by term query on a given field.
+/// Delete documents by term query on a given field (does NOT commit).
 pub async fn delete_documents(handle: &IndexHandle, field_name: &str, term_value: &str) -> Result<u64> {
     let field = handle
         .schema
@@ -232,20 +244,35 @@ pub async fn delete_documents(handle: &IndexHandle, field_name: &str, term_value
         _ => return Err(AppError::Schema("unsupported delete field type".to_string())),
     };
 
-    let writer = handle.writer.clone();
+    let index = handle.index.clone();
+    let writer_arc = handle.writer.clone();
     spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mut w = writer.write().await;
-            w.delete_term(term);
-            w.commit()?;
-            Ok::<_, AppError>(())
-        })
+        ensure_writer_init(&index, &writer_arc)?;
+        let mut guard = writer_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let w = guard.as_mut().unwrap();
+        w.delete_term(term);
+        Ok::<_, AppError>(())
     })
     .await
     .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
 
     Ok(1)
+}
+
+/// Commit any pending changes for an index.
+pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
+    let index = handle.index.clone();
+    let writer_arc = handle.writer.clone();
+    spawn_blocking(move || {
+        ensure_writer_init(&index, &writer_arc)?;
+        let mut guard = writer_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let w = guard.as_mut().unwrap();
+        w.commit()?;
+        Ok::<_, AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
+    Ok(())
 }
 
 /// Get document by its internal doc address (segment_ord, doc_id) or by a unique id field.
@@ -309,36 +336,32 @@ pub async fn index_stats(handle: &IndexHandle) -> Result<IndexStats> {
     })
 }
 
-/// Rebuild the index by committing and waiting for merges.
+/// Rebuild the index by committing and merging all segments into one.
 pub async fn rebuild_index(handle: &IndexHandle) -> Result<()> {
-    let writer = handle.writer.clone();
+    let index = handle.index.clone();
+    let writer_arc = handle.writer.clone();
     spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mut w = writer.write().await;
-            w.commit()?;
-            Ok::<_, AppError>(())
-        })
+        ensure_writer_init(&index, &writer_arc)?;
+        let mut guard = writer_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let w = guard.as_mut().unwrap();
+        w.commit()?;
+
+        let segments = index.searchable_segments()?;
+        let segment_ids: Vec<_> = segments.iter().map(|s| s.id()).collect();
+        if segment_ids.len() > 1 {
+            let merge_result = w.merge(&segment_ids);
+            merge_result.wait()?;
+        }
+        Ok::<_, AppError>(())
     })
     .await
     .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
     Ok(())
 }
 
-/// Compress index by committing.
+/// Compress (commit) the index.
 pub async fn compress_index(handle: &IndexHandle) -> Result<()> {
-    let writer = handle.writer.clone();
-    spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mut w = writer.write().await;
-            w.commit()?;
-            Ok::<_, AppError>(())
-        })
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
-    Ok(())
+    commit_index(handle).await
 }
 
 /// Delete documents whose `expired_at` timestamp is earlier than now.
@@ -353,15 +376,15 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
     let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
     let query = RangeQuery::new(Bound::Unbounded, upper);
 
-    let writer = handle.writer.clone();
+    let index = handle.index.clone();
+    let writer_arc = handle.writer.clone();
     spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mut w = writer.write().await;
-            w.delete_query(Box::new(query))?;
-            w.commit()?;
-            Ok::<_, AppError>(())
-        })
+        ensure_writer_init(&index, &writer_arc)?;
+        let mut guard = writer_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let w = guard.as_mut().unwrap();
+        w.delete_query(Box::new(query))?;
+        w.commit()?;
+        Ok::<_, AppError>(())
     })
     .await
     .map_err(|e| AppError::Internal(format!("spawn: {e}")))??;
@@ -377,6 +400,9 @@ pub async fn list_documents(
     offset: usize,
 ) -> Result<Vec<JsonValue>> {
     let searcher = handle.reader.searcher();
+    // Note: In tantivy 0.26, TopDocs must be converted via order_by_score (or similar)
+    // to become a Collector. AllQuery assigns a constant score, so ordering is a no-op
+    // but required by the API.
     let top_docs: Vec<(f32, tantivy::DocAddress)> = searcher
         .search(&AllQuery, &tantivy::collector::TopDocs::with_limit(limit + offset).order_by_score())?;
 

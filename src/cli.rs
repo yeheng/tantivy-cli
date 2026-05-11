@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::index::manager::IndexManager;
 use crate::index::ops;
 use crate::index::schema::SchemaDef;
-use crate::search::{SearchRequest, search_index};
+use crate::search::{EsSearchRequest, EsQuery, search_index};
 
 #[derive(Parser)]
 #[command(name = "tantivy-cli")]
@@ -118,6 +118,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             let handle = manager.open_index(&index).await?;
             let doc_json: serde_json::Value = serde_json::from_str(&doc)?;
             let id = ops::add_document(&handle, &doc_json).await?;
+            ops::commit_index(&handle).await?;
             println!("Document added: {}", id);
         }
         Commands::GetDoc { index, field, value } => {
@@ -128,6 +129,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
         Commands::DeleteDoc { index, field, value } => {
             let handle = manager.open_index(&index).await?;
             let deleted = ops::delete_documents(&handle, &field, &value).await?;
+            ops::commit_index(&handle).await?;
             println!("Deleted {} documents.", deleted);
         }
         Commands::Search {
@@ -138,12 +140,15 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             highlight,
         } => {
             let handle = manager.open_index(&index).await?;
-            let req = SearchRequest {
-                query,
-                limit,
-                offset,
+            let req = EsSearchRequest {
+                from: offset,
+                size: limit,
+                query: Some(EsQuery::QueryString { query }),
+                sort: Vec::new(),
+                aggs: None,
                 highlight_fields: highlight,
                 snippet_max_chars: 150,
+                _source: None,
             };
             let resp = search_index(&handle, &req).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
