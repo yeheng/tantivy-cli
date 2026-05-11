@@ -23,8 +23,15 @@ pub fn json_to_doc(schema: &tantivy::schema::Schema, data: &JsonValue) -> Result
             .get_field(key)
             .map_err(|_| AppError::FieldNotFound(key.clone()))?;
         let field_entry = schema.get_field_entry(field);
-        let owned_val = json_value_to_owned_value(val, field_entry.field_type())?;
-        doc.add_field_value(field, &owned_val);
+        if let JsonValue::Array(arr) = val {
+            for item in arr {
+                let owned_val = json_value_to_owned_value(item, field_entry.field_type())?;
+                doc.add_field_value(field, &owned_val);
+            }
+        } else {
+            let owned_val = json_value_to_owned_value(val, field_entry.field_type())?;
+            doc.add_field_value(field, &owned_val);
+        }
     }
     Ok(doc)
 }
@@ -170,7 +177,16 @@ pub fn doc_to_json(schema: &tantivy::schema::Schema, doc: &TantivyDocument) -> J
             OwnedValue::Object(obj) => serde_json::to_value(obj).unwrap_or(JsonValue::Null),
             _ => JsonValue::Null,
         };
-        map.insert(name.to_string(), json_val);
+        if let Some(existing) = map.get_mut(name) {
+            if let JsonValue::Array(arr) = existing {
+                arr.push(json_val);
+            } else {
+                let old = existing.clone();
+                *existing = JsonValue::Array(vec![old, json_val]);
+            }
+        } else {
+            map.insert(name.to_string(), json_val);
+        }
     }
     JsonValue::Object(map)
 }

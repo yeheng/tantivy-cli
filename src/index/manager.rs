@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use tantivy::schema::{Field, FieldType, Schema};
 use tantivy::{Index, IndexBuilder, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tokio::sync::mpsc;
@@ -70,71 +71,75 @@ impl IndexManager {
         name: &str,
         schema_def: &SchemaDef,
     ) -> Result<Arc<IndexHandle>> {
-        if self.indexes.contains_key(name) {
-            return Err(AppError::IndexAlreadyExists(name.to_string()));
+        match self.indexes.entry(name.to_string()) {
+            Entry::Occupied(_) => {
+                return Err(AppError::IndexAlreadyExists(name.to_string()));
+            }
+            Entry::Vacant(entry) => {
+                let index_dir = self.base_dir.join(name);
+                if index_dir.exists() {
+                    return Err(AppError::IndexAlreadyExists(name.to_string()));
+                }
+                std::fs::create_dir_all(&index_dir)?;
+
+                let schema = schema_def.to_schema()?;
+                let index = IndexBuilder::new()
+                    .schema(schema.clone())
+                    .create_in_dir(&index_dir)?;
+
+                let reader = index
+                    .reader_builder()
+                    .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                    .try_into()?;
+
+                let writer_tx = spawn_writer_actor(index.clone());
+
+                let handle = Arc::new(IndexHandle {
+                    name: name.to_string(),
+                    index,
+                    schema: schema.clone(),
+                    reader,
+                    writer_tx,
+                    expired_at_field: resolve_expired_at_field(&schema),
+                });
+
+                entry.insert(handle.clone());
+                Ok(handle)
+            }
         }
-
-        let index_dir = self.base_dir.join(name);
-        if index_dir.exists() {
-            return Err(AppError::IndexAlreadyExists(name.to_string()));
-        }
-        std::fs::create_dir_all(&index_dir)?;
-
-        let schema = schema_def.to_schema()?;
-        let index = IndexBuilder::new()
-            .schema(schema.clone())
-            .create_in_dir(&index_dir)?;
-
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()?;
-
-        let writer_tx = spawn_writer_actor(index.clone());
-
-        let handle = Arc::new(IndexHandle {
-            name: name.to_string(),
-            index,
-            schema: schema.clone(),
-            reader,
-            writer_tx,
-            expired_at_field: resolve_expired_at_field(&schema),
-        });
-
-        self.indexes.insert(name.to_string(), handle.clone());
-        Ok(handle)
     }
 
     pub async fn open_index(&self, name: &str) -> Result<Arc<IndexHandle>> {
-        if let Some(handle) = self.indexes.get(name) {
-            return Ok(handle.clone());
+        match self.indexes.entry(name.to_string()) {
+            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                let index_dir = self.base_dir.join(name);
+                if !index_dir.exists() {
+                    return Err(AppError::IndexNotFound(name.to_string()));
+                }
+
+                let index = Index::open_in_dir(&index_dir)?;
+                let schema = index.schema();
+                let reader = index
+                    .reader_builder()
+                    .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                    .try_into()?;
+
+                let writer_tx = spawn_writer_actor(index.clone());
+
+                let handle = Arc::new(IndexHandle {
+                    name: name.to_string(),
+                    index,
+                    schema: schema.clone(),
+                    reader,
+                    writer_tx,
+                    expired_at_field: resolve_expired_at_field(&schema),
+                });
+
+                entry.insert(handle.clone());
+                Ok(handle)
+            }
         }
-
-        let index_dir = self.base_dir.join(name);
-        if !index_dir.exists() {
-            return Err(AppError::IndexNotFound(name.to_string()));
-        }
-
-        let index = Index::open_in_dir(&index_dir)?;
-        let schema = index.schema();
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()?;
-
-        let writer_tx = spawn_writer_actor(index.clone());
-
-        let handle = Arc::new(IndexHandle {
-            name: name.to_string(),
-            index,
-            schema: schema.clone(),
-            reader,
-            writer_tx,
-            expired_at_field: resolve_expired_at_field(&schema),
-        });
-
-        self.indexes.insert(name.to_string(), handle.clone());
-        Ok(handle)
     }
 
     pub async fn delete_index(&self, name: &str) -> Result<()> {
@@ -161,7 +166,7 @@ impl IndexManager {
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().unwrap().to_string_lossy().to_string();
-                if !self.indexes.contains_key(&name) {
+                if let Entry::Vacant(vacant) = self.indexes.entry(name.clone()) {
                     if let Ok(index) = Index::open_in_dir(&path) {
                         let schema = index.schema();
                         let reader = index
@@ -177,7 +182,7 @@ impl IndexManager {
                             writer_tx,
                             expired_at_field: resolve_expired_at_field(&schema),
                         });
-                        self.indexes.insert(name.clone(), handle);
+                        vacant.insert(handle);
                         loaded.push(name);
                     }
                 }
