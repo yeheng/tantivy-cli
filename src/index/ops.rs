@@ -195,12 +195,32 @@ pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<
     Ok(id)
 }
 
+/// Add multiple documents in a single actor message (does NOT commit).
+/// Returns the number of documents successfully queued.
+pub async fn add_documents(handle: &IndexHandle, docs_json: &[JsonValue]) -> Result<usize> {
+    let mut docs = Vec::with_capacity(docs_json.len());
+    for doc_json in docs_json {
+        docs.push(json_to_doc(&handle.schema, doc_json)?);
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .writer_tx
+        .send(crate::index::manager::IndexCommand::AddDocs(docs, tx))
+        .await
+        .map_err(|_| AppError::Internal("writer closed".to_string()))?;
+    rx.await
+        .map_err(|_| AppError::Internal("writer dropped".to_string()))?
+}
+
 /// Delete documents by term query on a given field (does NOT commit).
+/// Returns Ok(()) when the deletion has been scheduled; Tantivy does not
+/// report the number of affected documents immediately.
 pub async fn delete_documents(
     handle: &IndexHandle,
     field_name: &str,
     term_value: &str,
-) -> Result<u64> {
+) -> Result<()> {
     let field = handle
         .schema
         .get_field(field_name)
@@ -241,7 +261,7 @@ pub async fn delete_documents(
     rx.await
         .map_err(|_| AppError::Internal("writer dropped".to_string()))??;
 
-    Ok(1)
+    Ok(())
 }
 
 /// Commit any pending changes for an index.

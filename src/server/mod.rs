@@ -69,6 +69,10 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
             axum::routing::post(docs::add_doc).get(docs::list_docs),
         )
         .route(
+            "/indexes/{name}/docs/_bulk",
+            axum::routing::post(docs::bulk_add_docs),
+        )
+        .route(
             "/indexes/{name}/docs/{field}/{value}",
             axum::routing::get(docs::get_doc).delete(docs::delete_doc),
         )

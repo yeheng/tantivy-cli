@@ -33,6 +33,16 @@ pub async fn add_doc(
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
+pub async fn bulk_add_docs(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(docs): Json<Vec<JsonValue>>,
+) -> Result<Json<JsonValue>> {
+    let handle = state.manager.open_index(&name).await?;
+    let count = ops::add_documents(&handle, &docs).await?;
+    Ok(Json(serde_json::json!({ "count": count })))
+}
+
 pub async fn list_docs(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -57,9 +67,9 @@ pub async fn delete_doc(
     Path((name, field, value)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse> {
     let handle = state.manager.open_index(&name).await?;
-    let deleted = ops::delete_documents(&handle, &field, &value).await?;
+    ops::delete_documents(&handle, &field, &value).await?;
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "deleted": deleted })),
+        Json(serde_json::json!({ "status": "scheduled" })),
     ))
 }

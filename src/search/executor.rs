@@ -72,6 +72,11 @@ pub async fn search_index(handle: &IndexHandle, req: &EsSearchRequest) -> Result
             req.aggs.as_ref(),
         )?
     } else {
+        if req.sort.len() > 1 {
+            return Err(AppError::BadRequest(
+                "Multiple sort fields are not supported yet".to_string(),
+            ));
+        }
         // Only support single-field sorting for now.
         let (field_name, order) = req.sort[0]
             .iter()

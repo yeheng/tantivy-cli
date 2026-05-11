@@ -51,6 +51,12 @@ pub enum Commands {
         field: String,
         value: String,
     },
+    /// Bulk add documents to an index (JSON array)
+    BulkAddDocs {
+        index: String,
+        #[arg(short, long)]
+        docs: String,
+    },
     /// Search an index
     Search {
         index: String,
@@ -128,9 +134,16 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             value,
         } => {
             let handle = manager.open_index(&index).await?;
-            let deleted = ops::delete_documents(&handle, &field, &value).await?;
+            ops::delete_documents(&handle, &field, &value).await?;
             ops::commit_index(&handle).await?;
-            println!("Deleted {} documents.", deleted);
+            println!("Deletion scheduled for field='{}' value='{}'.", field, value);
+        }
+        Commands::BulkAddDocs { index, docs } => {
+            let handle = manager.open_index(&index).await?;
+            let docs_json: Vec<serde_json::Value> = serde_json::from_str(&docs)?;
+            let count = ops::add_documents(&handle, &docs_json).await?;
+            ops::commit_index(&handle).await?;
+            println!("Bulk added {} documents.", count);
         }
         Commands::Search {
             index,

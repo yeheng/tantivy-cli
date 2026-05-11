@@ -134,7 +134,7 @@ jobs:
       
       - name: Package binary
         run: |
-          cd tantivy-cli/target/release
+          cd target/release
           Compress-Archive -Update -Path tantivy-cli.exe -DestinationPath tantivy-cli-windows.zip 
       
       - name: Upload binary

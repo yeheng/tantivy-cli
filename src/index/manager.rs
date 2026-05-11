@@ -23,6 +23,7 @@ fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
 /// Commands sent to the per-index writer actor.
 pub enum IndexCommand {
     AddDoc(TantivyDocument, tokio::sync::oneshot::Sender<Result<()>>),
+    AddDocs(Vec<TantivyDocument>, tokio::sync::oneshot::Sender<Result<usize>>),
     DeleteTerm(
         tantivy::schema::Term,
         tokio::sync::oneshot::Sender<Result<()>>,
@@ -207,6 +208,23 @@ fn spawn_writer_actor(index: Index) -> mpsc::Sender<IndexCommand> {
                     if res.is_ok() {
                         dirty = true;
                     }
+                    let _ = reply.send(res);
+                }
+                IndexCommand::AddDocs(docs, reply) => {
+                    let mut count = 0usize;
+                    let mut err = None;
+                    for doc in docs {
+                        if let Err(e) = writer.add_document(doc) {
+                            err = Some(AppError::Tantivy(e));
+                            break;
+                        }
+                        count += 1;
+                        dirty = true;
+                    }
+                    let res = match err {
+                        Some(e) => Err(e),
+                        None => Ok(count),
+                    };
                     let _ = reply.send(res);
                 }
                 IndexCommand::DeleteTerm(term, reply) => {
