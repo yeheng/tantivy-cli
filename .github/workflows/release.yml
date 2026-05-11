@@ -40,16 +40,16 @@ jobs:
       - name: Package (Linux/macOS)
         if: matrix.archive == 'tar.gz'
         run: |
-          cd tantivy-cli/target/${{ matrix.target }}/release
+          cd target/${{ matrix.target }}/release
           tar -czvf tantivy-cli-${{ matrix.target }}.tar.gz tantivy-cli
 
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         run: |
-          cd tantivy-cli/target/${{ matrix.target }}/release
+          cd target/${{ matrix.target }}/release
           7z a tantivy-cli-${{ matrix.target }}.zip tantivy-cli.exe
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
-          files: tantivy-cli/target/${{ matrix.target }}/release/tantivy-cli-${{ matrix.target }}.${{ matrix.archive }}
+          files: target/${{ matrix.target }}/release/tantivy-cli-${{ matrix.target }}.${{ matrix.archive }}

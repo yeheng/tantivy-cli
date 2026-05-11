@@ -4,12 +4,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'tantivy-cli/**'
+      - '**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'tantivy-cli/**'
+      - '**'
       - '.github/workflows/ci.yml'
 
 env:
@@ -34,8 +34,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            tantivy-cli/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tantivy-cli/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       
@@ -64,8 +64,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            tantivy-cli/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tantivy-cli/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       
@@ -76,7 +76,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tantivy-cli-linux
-          path: tantivy-cli/target/release/tantivy-cli
+          path: target/release/tantivy-cli
 
   build-macos:
     name: Build (macOS)
@@ -94,8 +94,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            tantivy-cli/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tantivy-cli/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       
@@ -106,7 +106,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tantivy-cli-macos
-          path: tantivy-cli/target/release/tantivy-cli
+          path: target/release/tantivy-cli
 
   build-windows:
     name: Build (Windows)
@@ -124,8 +124,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            tantivy-cli/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tantivy-cli/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       
@@ -141,5 +141,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tantivy-cli-windows
-          path: tantivy-cli/target/release/tantivy-cli-windows.zip
+          path: target/release/tantivy-cli-windows.zip
 
