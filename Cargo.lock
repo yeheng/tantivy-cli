@@ -1446,7 +1446,6 @@ dependencies = [
  "chrono",
  "clap",
  "dashmap",
- "parking_lot",
  "serde",
  "serde_json",
  "tantivy",

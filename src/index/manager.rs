@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use tantivy::schema::{Field, FieldType, Schema};
 use tantivy::{Index, IndexBuilder, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
+use tokio::sync::RwLock;
 
 use crate::error::{AppError, Result};
 use crate::index::schema::SchemaDef;
@@ -52,32 +54,26 @@ fn safe_index_path(base_dir: &Path, name: &str) -> Result<PathBuf> {
 
 pub struct ManagedWriter {
     pub writer: Option<IndexWriter>,
-    pub dirty: bool,
+    pub dirty: AtomicBool,
 }
 
 impl std::fmt::Debug for ManagedWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ManagedWriter")
             .field("has_writer", &self.writer.is_some())
-            .field("dirty", &self.dirty)
+            .field("dirty", &self.dirty.load(Ordering::Relaxed))
             .finish()
     }
 }
 
-fn lock_writer(
-    writer: &Arc<parking_lot::Mutex<ManagedWriter>>,
-) -> parking_lot::MutexGuard<'_, ManagedWriter> {
-    writer.lock()
-}
-
-/// Holds an opened index together with its shared writer mutex and reader.
+/// Holds an opened index together with its shared writer lock and reader.
 pub struct IndexHandle {
     pub name: String,
     pub index: Index,
     pub schema: Schema,
     pub reader: IndexReader,
-    /// Shared mutex-protected writer.
-    pub writer: Arc<parking_lot::Mutex<ManagedWriter>>,
+    /// Shared RwLock-protected writer.
+    pub writer: Arc<RwLock<ManagedWriter>>,
     /// If the schema contains an `expired_at` date field, document expiration is enabled.
     pub expired_at_field: Option<Field>,
 }
@@ -87,7 +83,6 @@ impl std::fmt::Debug for IndexHandle {
         f.debug_struct("IndexHandle")
             .field("name", &self.name)
             .field("schema", &self.schema)
-            .field("dirty", &self.writer.lock().dirty)
             .field("expired_at_field", &self.expired_at_field)
             .finish_non_exhaustive()
     }
@@ -150,9 +145,9 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let managed = Arc::new(parking_lot::Mutex::new(ManagedWriter {
+            let managed = Arc::new(RwLock::new(ManagedWriter {
                 writer: Some(writer),
-                dirty: false,
+                dirty: AtomicBool::new(false),
             }));
 
             let handle = Arc::new(IndexHandle {
@@ -202,9 +197,9 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let managed = Arc::new(parking_lot::Mutex::new(ManagedWriter {
+            let managed = Arc::new(RwLock::new(ManagedWriter {
                 writer: Some(writer),
-                dirty: false,
+                dirty: AtomicBool::new(false),
             }));
 
             let handle = Arc::new(IndexHandle {
@@ -252,7 +247,7 @@ impl IndexManager {
         let name_for_remove = name.clone();
         let delete_result = tokio::task::spawn_blocking(move || {
             if let Some(handle) = handle {
-                let mut managed = lock_writer(&handle.writer);
+                let mut managed = handle.writer.blocking_write();
                 managed.writer.take(); // drop IndexWriter, releasing file locks
                 drop(managed);
                 drop(handle);
@@ -346,9 +341,9 @@ impl IndexManager {
                             continue;
                         }
                     };
-                    let managed = Arc::new(parking_lot::Mutex::new(ManagedWriter {
+                    let managed = Arc::new(RwLock::new(ManagedWriter {
                         writer: Some(writer),
-                        dirty: false,
+                        dirty: AtomicBool::new(false),
                     }));
                     let handle = Arc::new(IndexHandle {
                         name: name.clone(),

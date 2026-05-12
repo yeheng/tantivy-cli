@@ -1,4 +1,5 @@
 use std::ops::Bound;
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -201,19 +202,14 @@ pub fn doc_to_json(schema: &tantivy::schema::Schema, doc: &TantivyDocument) -> J
 /// Add or update a document (does NOT commit).
 pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<String> {
     let doc = json_to_doc(&handle.schema, doc_json)?;
-    let writer = handle.writer.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock();
-        managed
-            .writer
-            .as_mut()
-            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
-            .add_document(doc)?;
-        managed.dirty = true;
-        Ok::<(), AppError>(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
+    let writer = handle.writer.read().await;
+    let w = writer
+        .writer
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+    w.add_document(doc)?;
+    writer.dirty.store(true, Ordering::Release);
+    drop(writer);
 
     let id = doc_json
         .get("id")
@@ -231,23 +227,19 @@ pub async fn add_documents(handle: &IndexHandle, docs_json: &[JsonValue]) -> Res
         docs.push(json_to_doc(&handle.schema, doc_json)?);
     }
 
-    let writer = handle.writer.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock();
-        let mut count = 0usize;
-        for doc in docs {
-            managed
-                .writer
-                .as_mut()
-                .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
-                .add_document(doc)?;
-            count += 1;
-            managed.dirty = true;
-        }
-        Ok::<usize, AppError>(count)
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
+    let writer = handle.writer.read().await;
+    let w = writer
+        .writer
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+    let mut count = 0usize;
+    for doc in docs {
+        w.add_document(doc)?;
+        count += 1;
+    }
+    writer.dirty.store(true, Ordering::Release);
+    drop(writer);
+    Ok(count)
 }
 
 /// Delete documents by term query on a given field (does NOT commit).
@@ -287,20 +279,14 @@ pub async fn delete_documents(
         }
     };
 
-    let writer = handle.writer.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock();
-        managed
-            .writer
-            .as_mut()
-            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
-            .delete_term(term);
-        managed.dirty = true;
-        Ok::<(), AppError>(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
-
+    let writer = handle.writer.read().await;
+    let w = writer
+        .writer
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+    w.delete_term(term);
+    writer.dirty.store(true, Ordering::Release);
+    drop(writer);
     Ok(())
 }
 
@@ -308,14 +294,14 @@ pub async fn delete_documents(
 pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock();
-        if managed.dirty {
+        let mut managed = writer.blocking_write();
+        if managed.dirty.load(Ordering::Acquire) {
             managed
                 .writer
                 .as_mut()
                 .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
                 .commit()?;
-            managed.dirty = false;
+            managed.dirty.store(false, Ordering::Release);
         }
         Ok::<(), AppError>(())
     })
@@ -419,13 +405,13 @@ pub async fn rebuild_index(handle: &IndexHandle) -> Result<()> {
     {
         let writer = handle.writer.clone();
         tokio::task::spawn_blocking(move || {
-            let mut managed = writer.lock();
+            let mut managed = writer.blocking_write();
             managed
                 .writer
                 .as_mut()
                 .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
                 .commit()?;
-            managed.dirty = false;
+            managed.dirty.store(false, Ordering::Release);
             Ok::<(), AppError>(())
         })
         .await
@@ -444,10 +430,10 @@ pub async fn rebuild_index(handle: &IndexHandle) -> Result<()> {
         return Ok(());
     }
 
-    // Phase 3: merge under lock (slow, but only holds lock during merge).
+    // Phase 3: merge under lock (slow, but only holds write lock during merge).
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock();
+        let mut managed = writer.blocking_write();
         let w = managed
             .writer
             .as_mut()
@@ -500,13 +486,13 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
             return Ok(());
         }
 
-        let mut managed = writer.lock();
+        let managed = writer.blocking_read();
         managed
             .writer
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
             .delete_query(Box::new(RangeQuery::new(Bound::Unbounded, upper)))?;
-        managed.dirty = true;
+        managed.dirty.store(true, Ordering::Release);
         tracing::info!(index = %index_name, "cleaned up expired documents");
         Ok::<(), AppError>(())
     })
