@@ -203,7 +203,7 @@ pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<
     let doc = json_to_doc(&handle.schema, doc_json)?;
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock().unwrap();
+        let mut managed = writer.lock();
         managed
             .writer
             .as_mut()
@@ -233,7 +233,7 @@ pub async fn add_documents(handle: &IndexHandle, docs_json: &[JsonValue]) -> Res
 
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock().unwrap();
+        let mut managed = writer.lock();
         let mut count = 0usize;
         for doc in docs {
             managed
@@ -251,8 +251,6 @@ pub async fn add_documents(handle: &IndexHandle, docs_json: &[JsonValue]) -> Res
 }
 
 /// Delete documents by term query on a given field (does NOT commit).
-/// Returns Ok(()) when the deletion has been scheduled; Tantivy does not
-/// report the number of affected documents immediately.
 pub async fn delete_documents(
     handle: &IndexHandle,
     field_name: &str,
@@ -291,7 +289,7 @@ pub async fn delete_documents(
 
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock().unwrap();
+        let mut managed = writer.lock();
         managed
             .writer
             .as_mut()
@@ -310,7 +308,7 @@ pub async fn delete_documents(
 pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock().unwrap();
+        let mut managed = writer.lock();
         if managed.dirty {
             managed
                 .writer
@@ -326,7 +324,7 @@ pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
     Ok(())
 }
 
-/// Get document by its internal doc address (segment_ord, doc_id) or by a unique id field.
+/// Get document by field value.
 pub async fn get_document(
     handle: &IndexHandle,
     field_name: Option<&str>,
@@ -390,37 +388,67 @@ pub async fn index_stats(handle: &IndexHandle) -> Result<IndexStats> {
 }
 
 /// Rebuild the index by committing and merging all segments into one.
+/// The lock is released between commit and merge so other writes are not
+/// blocked for the entire duration of the operation.
 pub async fn rebuild_index(handle: &IndexHandle) -> Result<()> {
-    let index = handle.index.clone();
-    let writer = handle.writer.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock().unwrap();
-        managed
-            .writer
-            .as_mut()
-            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
-            .commit()?;
-        let segments = index.searchable_segments()?;
-        let segment_ids: Vec<_> = segments.iter().map(|s| s.id()).collect();
-        if segment_ids.len() > 1 {
-            let w = managed
+    // Phase 1: commit under lock (fast).
+    {
+        let writer = handle.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut managed = writer.lock();
+            managed
                 .writer
                 .as_mut()
-                .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
-            let merge_result = w.merge(&segment_ids);
-            merge_result.wait()?;
-        }
-        managed.dirty = false;
+                .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+                .commit()?;
+            managed.dirty = false;
+            Ok::<(), AppError>(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
+    }
+
+    // Phase 2: collect segment ids (read-only, no lock needed).
+    let segments = {
+        let index = handle.index.clone();
+        tokio::task::spawn_blocking(move || index.searchable_segments())
+            .await
+            .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
+    };
+    let segment_ids: Vec<_> = segments?.iter().map(|s| s.id()).collect();
+    if segment_ids.len() <= 1 {
+        return Ok(());
+    }
+
+    // Phase 3: merge under lock (slow, but only holds lock during merge).
+    let writer = handle.writer.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut managed = writer.lock();
+        let w = managed
+            .writer
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+        let merge_result = w.merge(&segment_ids);
+        merge_result.wait()?;
         Ok::<(), AppError>(())
     })
     .await
     .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
+
     Ok(())
 }
 
-/// Compress (commit) the index.
+/// Commit and wait for merge to complete, then commit again.
+/// This is a real "compress" operation — not just a commit alias.
 pub async fn compress_index(handle: &IndexHandle) -> Result<()> {
-    commit_index(handle).await
+    // Commit first to flush any pending writes.
+    commit_index(handle).await?;
+
+    // Then merge all segments into one and commit again.
+    rebuild_index(handle).await?;
+
+    commit_index(handle).await?;
+    Ok(())
 }
 
 /// Delete documents whose `expired_at` timestamp is earlier than now.
@@ -447,7 +475,7 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
 
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let mut managed = writer.lock().unwrap();
+        let mut managed = writer.lock();
         managed
             .writer
             .as_mut()
@@ -463,15 +491,21 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
     Ok(())
 }
 
-/// List all documents (paginated).
-/// Uses a hard limit of 10_000 on offset+limit to prevent OOM on deep pagination.
+/// Maximum number of documents that can be retrieved in a single list request.
 const MAX_RESULT_WINDOW: usize = 10_000;
 
+/// List all documents (paginated).
+/// Uses Tantivy's TopDocs collector for efficient retrieval.
+/// Note: deep offset is still O(offset) — for true cursor-based pagination,
+/// consider using search with a range query on a fast field.
 pub async fn list_documents(
     handle: &IndexHandle,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<JsonValue>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     if offset + limit > MAX_RESULT_WINDOW {
         return Err(AppError::BadRequest(format!(
             "offset + limit cannot exceed {MAX_RESULT_WINDOW}"
@@ -479,18 +513,23 @@ pub async fn list_documents(
     }
 
     let searcher = handle.reader.searcher();
+    let total = searcher.num_docs() as usize;
+    if offset >= total {
+        return Ok(Vec::new());
+    }
 
-    let doc_addresses: Vec<DocAddress> = searcher
-        .segment_readers()
-        .iter()
-        .enumerate()
-        .flat_map(|(segment_ord, segment_reader)| {
-            segment_reader
-                .doc_ids_alive()
-                .map(move |doc_id| DocAddress::new(segment_ord as u32, doc_id))
-        })
+    let actual_limit = (offset + limit).min(total);
+
+    // Retrieve top docs with offset+limit, then skip the first `offset` results.
+    let top_docs: Vec<(f32, DocAddress)> = searcher.search(
+        &tantivy::query::AllQuery,
+        &tantivy::collector::TopDocs::with_limit(actual_limit).order_by_score(),
+    )?;
+
+    let doc_addresses: Vec<DocAddress> = top_docs
+        .into_iter()
         .skip(offset)
-        .take(limit)
+        .map(|(_, addr)| addr)
         .collect();
 
     let mut docs = Vec::with_capacity(doc_addresses.len());

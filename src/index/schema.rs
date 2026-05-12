@@ -30,6 +30,60 @@ pub struct FieldDef {
     pub fast: bool,
 }
 
+/// Helper to apply common stored/indexed/fast flags to NumericOptions.
+fn numeric_opts(stored: bool, indexed: bool, fast: bool) -> NumericOptions {
+    let mut opts = NumericOptions::default();
+    if stored {
+        opts = opts.set_stored();
+    }
+    if indexed {
+        opts = opts.set_indexed();
+    }
+    if fast {
+        opts = opts.set_fast();
+    }
+    opts
+}
+
+/// Helper to apply common stored/indexed/fast flags to DateOptions.
+fn date_opts(stored: bool, indexed: bool, fast: bool) -> DateOptions {
+    let mut opts = DateOptions::default();
+    if stored {
+        opts = opts.set_stored();
+    }
+    if indexed {
+        opts = opts.set_indexed();
+    }
+    if fast {
+        opts = opts.set_fast();
+    }
+    opts
+}
+
+/// Helper to apply stored flag to FacetOptions.
+fn facet_opts(stored: bool) -> FacetOptions {
+    let mut opts = FacetOptions::default();
+    if stored {
+        opts = opts.set_stored();
+    }
+    opts
+}
+
+/// Helper to apply stored/indexed/fast flags to BytesOptions.
+fn bytes_opts(stored: bool, indexed: bool, fast: bool) -> BytesOptions {
+    let mut opts = BytesOptions::default();
+    if stored {
+        opts = opts.set_stored();
+    }
+    if indexed {
+        opts = opts.set_indexed();
+    }
+    if fast {
+        opts = opts.set_fast();
+    }
+    opts
+}
+
 impl FieldDef {
     pub fn add_to_schema(&self, builder: &mut SchemaBuilder) -> Result<()> {
         match &self.kind {
@@ -54,89 +108,25 @@ impl FieldDef {
                 builder.add_text_field(&self.name, opts);
             }
             FieldKind::U64 => {
-                let mut opts = NumericOptions::default();
-                if self.stored {
-                    opts = opts.set_stored();
-                }
-                if self.indexed {
-                    opts = opts.set_indexed();
-                }
-                if self.fast {
-                    opts = opts.set_fast();
-                }
-                builder.add_u64_field(&self.name, opts);
+                builder.add_u64_field(&self.name, numeric_opts(self.stored, self.indexed, self.fast));
             }
             FieldKind::I64 => {
-                let mut opts = NumericOptions::default();
-                if self.stored {
-                    opts = opts.set_stored();
-                }
-                if self.indexed {
-                    opts = opts.set_indexed();
-                }
-                if self.fast {
-                    opts = opts.set_fast();
-                }
-                builder.add_i64_field(&self.name, opts);
+                builder.add_i64_field(&self.name, numeric_opts(self.stored, self.indexed, self.fast));
             }
             FieldKind::F64 => {
-                let mut opts = NumericOptions::default();
-                if self.stored {
-                    opts = opts.set_stored();
-                }
-                if self.indexed {
-                    opts = opts.set_indexed();
-                }
-                if self.fast {
-                    opts = opts.set_fast();
-                }
-                builder.add_f64_field(&self.name, opts);
+                builder.add_f64_field(&self.name, numeric_opts(self.stored, self.indexed, self.fast));
             }
             FieldKind::Bool => {
-                let mut opts = NumericOptions::default();
-                if self.stored {
-                    opts = opts.set_stored();
-                }
-                if self.indexed {
-                    opts = opts.set_indexed();
-                }
-                if self.fast {
-                    opts = opts.set_fast();
-                }
-                builder.add_bool_field(&self.name, opts);
+                builder.add_bool_field(&self.name, numeric_opts(self.stored, self.indexed, self.fast));
             }
             FieldKind::Date => {
-                let mut opts = DateOptions::default();
-                if self.stored {
-                    opts = opts.set_stored();
-                }
-                if self.indexed {
-                    opts = opts.set_indexed();
-                }
-                if self.fast {
-                    opts = opts.set_fast();
-                }
-                builder.add_date_field(&self.name, opts);
+                builder.add_date_field(&self.name, date_opts(self.stored, self.indexed, self.fast));
             }
             FieldKind::Facet => {
-                let mut opts = FacetOptions::default();
-                if self.stored {
-                    opts = opts.set_stored();
-                }
-                builder.add_facet_field(&self.name, opts);
+                builder.add_facet_field(&self.name, facet_opts(self.stored));
             }
             FieldKind::Bytes => {
-                let mut opts = BytesOptions::default();
-                if self.stored {
-                    opts = opts.set_stored();
-                }
-                if self.indexed {
-                    opts = opts.set_indexed();
-                }
-                if self.fast {
-                    opts = opts.set_fast();
-                }
-                builder.add_bytes_field(&self.name, opts);
+                builder.add_bytes_field(&self.name, bytes_opts(self.stored, self.indexed, self.fast));
             }
             FieldKind::Json => {
                 let mut opts = JsonObjectOptions::default();

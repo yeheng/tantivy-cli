@@ -55,7 +55,8 @@ where
     }
 }
 
-pub async fn search_index(handle: &IndexHandle, req: &EsSearchRequest) -> Result<SearchResponse> {
+/// Internal synchronous search logic, extracted so it can be run inside spawn_blocking.
+fn do_search(handle: &IndexHandle, req: &EsSearchRequest) -> Result<SearchResponse> {
     let searcher = handle.reader.searcher();
     let query = build_final_query(handle, req)?;
     let snippet_gens = build_snippet_gens(handle, &searcher, &*query, req)?;
@@ -166,4 +167,14 @@ pub async fn search_index(handle: &IndexHandle, req: &EsSearchRequest) -> Result
         offset: req.from,
         aggregations,
     })
+}
+
+pub async fn search_index(handle: &std::sync::Arc<IndexHandle>, req: &EsSearchRequest) -> Result<SearchResponse> {
+    // Search can be CPU-heavy (especially with aggregations), so run it on
+    // the blocking thread pool to avoid stalling the async runtime.
+    let req = req.clone();
+    let handle = handle.clone();
+    tokio::task::spawn_blocking(move || do_search(&handle, &req))
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
 }

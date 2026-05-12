@@ -19,7 +19,7 @@ impl From<SortOrder> for tantivy::Order {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct EsSearchRequest {
     #[serde(alias = "offset", default)]
     pub from: usize,
@@ -45,7 +45,7 @@ fn default_snippet_chars() -> usize {
     150
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum EsQuery {
     Bool {
@@ -66,7 +66,7 @@ pub enum EsQuery {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RangeParams {
     #[serde(default)]
     pub gte: Option<JsonValue>,

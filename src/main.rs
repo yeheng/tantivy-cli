@@ -8,10 +8,11 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::cli::{Cli, run_cli};
+use crate::error::Result;
 use crate::index::manager::IndexManager;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -24,7 +25,13 @@ async fn main() -> anyhow::Result<()> {
     let manager = IndexManager::new(&cli.index_dir)?;
 
     // Load all existing indexes eagerly so background tasks can see them.
-    let _ = manager.load_all_indexes();
+    let loaded = {
+        let mgr = manager.clone();
+        tokio::task::spawn_blocking(move || mgr.load_all_indexes())
+            .await
+            .map_err(|e| crate::error::AppError::Internal(format!("spawn_blocking failed: {e}")))?
+    }?;
+    tracing::info!(count = loaded.len(), indexes = ?loaded, "loaded existing indexes");
 
     run_cli(cli, &manager).await?;
     Ok(())

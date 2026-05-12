@@ -1,4 +1,5 @@
 use axum::Router;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -17,20 +18,34 @@ pub struct AppState {
 }
 
 pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
     // Start background task to periodically commit indexes.
-    // Note: `ops::commit_index` delegates to the per-index writer actor, which
-    // tracks a `dirty` flag and only performs an actual Tantivy commit when
-    // there are pending changes. Idle indexes produce zero disk I/O.
     let commit_manager = manager.clone();
-    tokio::spawn(async move {
+    let commit_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            let handles = commit_manager.iter_handles();
-            for handle in handles {
-                if let Err(e) = ops::commit_index(&handle).await {
-                    tracing::error!(index = %handle.name, error = %e, "failed to commit index");
+            tokio::select! {
+                _ = interval.tick() => {
+                    let handles = commit_manager.iter_handles();
+                    for handle in handles {
+                        if let Err(e) = ops::commit_index(&handle).await {
+                            tracing::error!(index = %handle.name, error = %e, "failed to commit index");
+                        }
+                    }
+                }
+                _ = cancel_clone.cancelled() => {
+                    tracing::info!("commit task shutting down");
+                    // Final commit before exit.
+                    let handles = commit_manager.iter_handles();
+                    for handle in handles {
+                        if let Err(e) = ops::commit_index(&handle).await {
+                            tracing::error!(index = %handle.name, error = %e, "final commit failed");
+                        }
+                    }
+                    break;
                 }
             }
         }
@@ -38,17 +53,26 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
 
     // Start background task to periodically clean up expired documents.
     let cleanup_manager = manager.clone();
-    tokio::spawn(async move {
+    let cleanup_cancel = CancellationToken::new();
+    let cleanup_cancel_clone = cleanup_cancel.clone();
+    let cleanup_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            let handles = cleanup_manager.iter_handles();
-            for handle in handles {
-                if handle.expired_at_field.is_some() {
-                    if let Err(e) = ops::cleanup_expired(&handle).await {
-                        tracing::error!(index = %handle.name, error = %e, "failed to cleanup expired documents");
+            tokio::select! {
+                _ = interval.tick() => {
+                    let handles = cleanup_manager.iter_handles();
+                    for handle in handles {
+                        if handle.expired_at_field.is_some() {
+                            if let Err(e) = ops::cleanup_expired(&handle).await {
+                                tracing::error!(index = %handle.name, error = %e, "failed to cleanup expired documents");
+                            }
+                        }
                     }
+                }
+                _ = cleanup_cancel_clone.cancelled() => {
+                    tracing::info!("cleanup task shutting down");
+                    break;
                 }
             }
         }
@@ -97,6 +121,42 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, app).await?;
+    tracing::info!(%bind, "server listening");
+
+    // Run the server until graceful shutdown (Ctrl+C or SIGTERM).
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Signal background tasks to stop and wait for them.
+    cancel.cancel();
+    cleanup_cancel.cancel();
+    let _ = commit_handle.await;
+    let _ = cleanup_handle.await;
+
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => { tracing::info!("received Ctrl+C"); },
+        _ = terminate => { tracing::info!("received SIGTERM"); },
+    }
 }

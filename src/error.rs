@@ -77,10 +77,12 @@ impl IntoResponse for AppError {
             AppError::IndexNotFound(_) | AppError::DocNotFound(_) | AppError::FieldNotFound(_) => {
                 (StatusCode::NOT_FOUND, self.to_string())
             }
-            AppError::IndexAlreadyExists(_) | AppError::Schema(_) | AppError::Query(_) => {
+            // 409 only for resources that already exist
+            AppError::IndexAlreadyExists(_) => {
                 (StatusCode::CONFLICT, self.to_string())
             }
-            AppError::BadRequest(_) | AppError::Parse(_) => {
+            // 400 for bad requests: schema issues, query syntax errors, bad input
+            AppError::BadRequest(_) | AppError::Parse(_) | AppError::Schema(_) | AppError::Query(_) => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
             _ => (
