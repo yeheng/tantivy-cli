@@ -98,7 +98,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             println!("Index '{}' created.", name);
         }
         Commands::ListIndexes => {
-            manager.load_all_indexes()?;
+            manager.load_all_indexes().await?;
             let names = manager.list_indexes();
             if names.is_empty() {
                 println!("No indexes found.");
@@ -166,7 +166,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
                 snippet_max_chars: 150,
                 _source: None,
             };
-            let resp = search_index(&handle, &req).await?;
+            let resp = search_index(handle, &req).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Commands::Stats { index } => {

@@ -1,5 +1,5 @@
 use serde_json::Value as JsonValue;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, ConstScoreQuery, Occur, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::{FieldType, IndexRecordOption, Term};
 
 use crate::error::{AppError, Result};
@@ -73,7 +73,10 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
                 subqueries.push((Occur::Must, build_es_query(handle, q)?));
             }
             for q in filter {
-                subqueries.push((Occur::Must, build_es_query(handle, q)?));
+                subqueries.push((
+                    Occur::Must,
+                    Box::new(ConstScoreQuery::new(build_es_query(handle, q)?, 1.0)),
+                ));
             }
             for q in should {
                 subqueries.push((Occur::Should, build_es_query(handle, q)?));

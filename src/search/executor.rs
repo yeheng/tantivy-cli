@@ -169,11 +169,10 @@ fn do_search(handle: &IndexHandle, req: &EsSearchRequest) -> Result<SearchRespon
     })
 }
 
-pub async fn search_index(handle: &std::sync::Arc<IndexHandle>, req: &EsSearchRequest) -> Result<SearchResponse> {
+pub async fn search_index(handle: std::sync::Arc<IndexHandle>, req: &EsSearchRequest) -> Result<SearchResponse> {
     // Search can be CPU-heavy (especially with aggregations), so run it on
     // the blocking thread pool to avoid stalling the async runtime.
     let req = req.clone();
-    let handle = handle.clone();
     tokio::task::spawn_blocking(move || do_search(&handle, &req))
         .await
         .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?

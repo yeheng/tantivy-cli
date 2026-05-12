@@ -3,7 +3,8 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tantivy::{
-    DocAddress, TantivyDocument,
+    DocAddress, DocId, Score, SegmentReader, TantivyDocument,
+    collector::{Collector, SegmentCollector},
     query::{RangeQuery, TermQuery},
     schema::{IndexRecordOption, OwnedValue, Term},
 };
@@ -324,47 +325,123 @@ pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
     Ok(())
 }
 
+/// Collector that retrieves documents without scoring, for stable pagination.
+struct ListDocsCollector {
+    limit: usize,
+    offset: usize,
+}
+
+impl Collector for ListDocsCollector {
+    type Fruit = Vec<DocAddress>;
+    type Child = ListDocsChildCollector;
+
+    fn for_segment(
+        &self,
+        segment_local_id: u32,
+        _segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(ListDocsChildCollector {
+            segment_local_id,
+            docs: Vec::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        false
+    }
+
+    fn merge_fruits(
+        &self,
+        segment_fruits: Vec<(u32, Vec<DocId>)>,
+    ) -> tantivy::Result<Self::Fruit> {
+        let mut result = Vec::new();
+        for (segment_local_id, docs) in segment_fruits {
+            for doc in docs {
+                result.push(DocAddress::new(segment_local_id, doc));
+            }
+        }
+        let start = self.offset.min(result.len());
+        Ok(result.into_iter().skip(start).take(self.limit).collect())
+    }
+}
+
+struct ListDocsChildCollector {
+    segment_local_id: u32,
+    docs: Vec<DocId>,
+}
+
+impl SegmentCollector for ListDocsChildCollector {
+    type Fruit = (u32, Vec<DocId>);
+
+    fn collect(&mut self, doc: DocId, _score: Score) {
+        self.docs.push(doc);
+    }
+
+    fn harvest(self) -> (u32, Vec<DocId>) {
+        (self.segment_local_id, self.docs)
+    }
+}
+
 /// Get document by field value.
 pub async fn get_document(
     handle: &IndexHandle,
     field_name: Option<&str>,
     term_value: &str,
 ) -> Result<JsonValue> {
-    let searcher = handle.reader.searcher();
+    let field_name = field_name.map(|s| s.to_string());
+    let term_value = term_value.to_string();
+    let schema = handle.schema.clone();
+    let reader = handle.reader.clone();
 
-    let doc = if let Some(field_name) = field_name {
-        let field = handle
-            .schema
-            .get_field(field_name)
-            .map_err(|_| AppError::FieldNotFound(field_name.to_string()))?;
-        let field_entry = handle.schema.get_field_entry(field);
-        let term = match field_entry.field_type() {
-            tantivy::schema::FieldType::Str(_) => Term::from_field_text(field, term_value),
-            tantivy::schema::FieldType::U64(_) => Term::from_field_u64(field, term_value.parse()?),
-            tantivy::schema::FieldType::I64(_) => Term::from_field_i64(field, term_value.parse()?),
-            _ => {
-                return Err(AppError::Schema(
-                    "unsupported lookup field type".to_string(),
-                ));
+    tokio::task::spawn_blocking(move || {
+        let searcher = reader.searcher();
+
+        let doc = if let Some(field_name) = field_name {
+            let field = schema
+                .get_field(&field_name)
+                .map_err(|_| AppError::FieldNotFound(field_name.clone()))?;
+            let field_entry = schema.get_field_entry(field);
+            let term = match field_entry.field_type() {
+                tantivy::schema::FieldType::Str(_) => Term::from_field_text(field, &term_value),
+                tantivy::schema::FieldType::U64(_) => Term::from_field_u64(field, term_value.parse()?),
+                tantivy::schema::FieldType::I64(_) => Term::from_field_i64(field, term_value.parse()?),
+                tantivy::schema::FieldType::F64(_) => Term::from_field_f64(field, term_value.parse()?),
+                tantivy::schema::FieldType::Bool(_) => Term::from_field_bool(field, term_value.parse()?),
+                tantivy::schema::FieldType::Date(_) => {
+                    let dt = term_value
+                        .parse::<chrono::DateTime<chrono::Utc>>()
+                        .map_err(|e| AppError::Schema(format!("invalid date: {e}")))?;
+                    Term::from_field_date_for_search(
+                        field,
+                        tantivy::DateTime::from_timestamp_micros(dt.timestamp_micros()),
+                    )
+                }
+                _ => {
+                    return Err(AppError::Schema(
+                        "unsupported lookup field type".to_string(),
+                    ));
+                }
+            };
+            let query = TermQuery::new(term, IndexRecordOption::Basic);
+            let top_docs: Vec<(f32, DocAddress)> = searcher.search(
+                &query,
+                &tantivy::collector::TopDocs::with_limit(1).order_by_score(),
+            )?;
+            if let Some((_, doc_address)) = top_docs.into_iter().next() {
+                searcher.doc::<TantivyDocument>(doc_address)?
+            } else {
+                return Err(AppError::DocNotFound(term_value));
             }
-        };
-        let query = TermQuery::new(term, IndexRecordOption::Basic);
-        let top_docs: Vec<(f32, tantivy::DocAddress)> = searcher.search(
-            &query,
-            &tantivy::collector::TopDocs::with_limit(1).order_by_score(),
-        )?;
-        if let Some((_, doc_address)) = top_docs.into_iter().next() {
-            searcher.doc::<TantivyDocument>(doc_address)?
         } else {
-            return Err(AppError::DocNotFound(term_value.to_string()));
-        }
-    } else {
-        return Err(AppError::BadRequest(
-            "field_name required for get".to_string(),
-        ));
-    };
+            return Err(AppError::BadRequest(
+                "field_name required for get".to_string(),
+            ));
+        };
 
-    Ok(doc_to_json(&handle.schema, &doc))
+        Ok(doc_to_json(&schema, &doc))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -462,19 +539,20 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
     let now = tantivy::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros());
     let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
 
-    // Fast path: check if there are any expired documents before acquiring
-    // the writer lock or performing any disk I/O.
-    let searcher = handle.reader.searcher();
-    let count = searcher.search(
-        &RangeQuery::new(Bound::Unbounded, upper.clone()),
-        &tantivy::collector::Count,
-    )?;
-    if count == 0 {
-        return Ok(());
-    }
-
     let writer = handle.writer.clone();
+    let reader = handle.reader.clone();
+    let index_name = handle.name.clone();
+
     tokio::task::spawn_blocking(move || {
+        let searcher = reader.searcher();
+        let count = searcher.search(
+            &RangeQuery::new(Bound::Unbounded, upper.clone()),
+            &tantivy::collector::Count,
+        )?;
+        if count == 0 {
+            return Ok(());
+        }
+
         let mut managed = writer.lock();
         managed
             .writer
@@ -482,12 +560,12 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
             .delete_query(Box::new(RangeQuery::new(Bound::Unbounded, upper)))?;
         managed.dirty = true;
+        tracing::info!(index = %index_name, "cleaned up expired documents");
         Ok::<(), AppError>(())
     })
     .await
     .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
 
-    tracing::info!(index = %handle.name, "cleaned up expired documents");
     Ok(())
 }
 
@@ -495,7 +573,6 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
 const MAX_RESULT_WINDOW: usize = 10_000;
 
 /// List all documents (paginated).
-/// Uses Tantivy's TopDocs collector for efficient retrieval.
 /// Note: deep offset is still O(offset) — for true cursor-based pagination,
 /// consider using search with a range query on a fast field.
 pub async fn list_documents(
@@ -512,30 +589,28 @@ pub async fn list_documents(
         )));
     }
 
-    let searcher = handle.reader.searcher();
-    let total = searcher.num_docs() as usize;
-    if offset >= total {
-        return Ok(Vec::new());
-    }
+    let schema = handle.schema.clone();
+    let reader = handle.reader.clone();
 
-    let actual_limit = (offset + limit).min(total);
+    tokio::task::spawn_blocking(move || {
+        let searcher = reader.searcher();
+        let total = searcher.num_docs() as usize;
+        if offset >= total {
+            return Ok(Vec::new());
+        }
 
-    // Retrieve top docs with offset+limit, then skip the first `offset` results.
-    let top_docs: Vec<(f32, DocAddress)> = searcher.search(
-        &tantivy::query::AllQuery,
-        &tantivy::collector::TopDocs::with_limit(actual_limit).order_by_score(),
-    )?;
+        let doc_addresses: Vec<DocAddress> = searcher.search(
+            &tantivy::query::AllQuery,
+            &ListDocsCollector { limit, offset },
+        )?;
 
-    let doc_addresses: Vec<DocAddress> = top_docs
-        .into_iter()
-        .skip(offset)
-        .map(|(_, addr)| addr)
-        .collect();
-
-    let mut docs = Vec::with_capacity(doc_addresses.len());
-    for doc_address in doc_addresses {
-        let doc = searcher.doc::<TantivyDocument>(doc_address)?;
-        docs.push(doc_to_json(&handle.schema, &doc));
-    }
-    Ok(docs)
+        let mut docs = Vec::with_capacity(doc_addresses.len());
+        for doc_address in doc_addresses {
+            let doc = searcher.doc::<TantivyDocument>(doc_address)?;
+            docs.push(doc_to_json(&schema, &doc));
+        }
+        Ok(docs)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
 }

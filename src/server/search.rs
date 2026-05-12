@@ -45,7 +45,7 @@ pub async fn search(
         snippet_max_chars: q.snippet_max_chars,
         _source: None,
     };
-    let resp = search_index(&handle, &req).await?;
+    let resp = search_index(handle, &req).await?;
     Ok(Json(resp))
 }
 
@@ -55,6 +55,6 @@ pub async fn search_post(
     Json(req): Json<EsSearchRequest>,
 ) -> Result<Json<SearchResponse>> {
     let handle = state.manager.open_index(&name).await?;
-    let resp = search_index(&handle, &req).await?;
+    let resp = search_index(handle, &req).await?;
     Ok(Json(resp))
 }

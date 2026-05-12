@@ -25,12 +25,7 @@ async fn main() -> Result<()> {
     let manager = IndexManager::new(&cli.index_dir)?;
 
     // Load all existing indexes eagerly so background tasks can see them.
-    let loaded = {
-        let mgr = manager.clone();
-        tokio::task::spawn_blocking(move || mgr.load_all_indexes())
-            .await
-            .map_err(|e| crate::error::AppError::Internal(format!("spawn_blocking failed: {e}")))?
-    }?;
+    let loaded = manager.load_all_indexes().await?;
     tracing::info!(count = loaded.len(), indexes = ?loaded, "loaded existing indexes");
 
     run_cli(cli, &manager).await?;

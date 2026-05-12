@@ -37,7 +37,7 @@ pub async fn create_index(
 }
 
 pub async fn list_indexes(State(state): State<AppState>) -> Result<Json<Vec<String>>> {
-    state.manager.load_all_indexes()?;
+    state.manager.load_all_indexes().await?;
     Ok(Json(state.manager.list_indexes()))
 }
 
