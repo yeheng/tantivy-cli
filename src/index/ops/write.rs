@@ -29,25 +29,31 @@ pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<
 
 /// Add multiple documents in a single operation (does NOT commit).
 /// Returns the number of documents successfully queued.
-pub async fn add_documents(handle: &IndexHandle, docs_json: &[JsonValue]) -> Result<usize> {
-    let mut docs = Vec::with_capacity(docs_json.len());
-    for doc_json in docs_json {
-        docs.push(json_to_doc(&handle.schema, doc_json)?);
-    }
+pub async fn add_documents(handle: &IndexHandle, docs_json: Vec<JsonValue>) -> Result<usize> {
+    let schema = handle.schema.clone();
+    let writer = handle.writer.clone();
 
-    let writer = handle.writer.read().unwrap();
-    let w = writer
-        .writer
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
-    let mut count = 0usize;
-    for doc in docs {
-        w.add_document(doc)?;
-        count += 1;
-    }
-    writer.dirty.store(true, Ordering::Release);
-    drop(writer);
-    Ok(count)
+    tokio::task::spawn_blocking(move || {
+        let mut docs = Vec::with_capacity(docs_json.len());
+        for doc_json in &docs_json {
+            docs.push(json_to_doc(&schema, doc_json)?);
+        }
+
+        let writer = writer.read().unwrap();
+        let w = writer
+            .writer
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+        let mut count = 0usize;
+        for doc in docs {
+            w.add_document(doc)?;
+            count += 1;
+        }
+        writer.dirty.store(true, Ordering::Release);
+        Ok::<usize, AppError>(count)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
 }
 
 /// Delete documents by term query on a given field (does NOT commit).

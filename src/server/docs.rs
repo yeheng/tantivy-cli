@@ -39,7 +39,7 @@ pub async fn bulk_add_docs(
     Json(docs): Json<Vec<JsonValue>>,
 ) -> Result<Json<JsonValue>> {
     let handle = state.manager.open_index(&name).await?;
-    let count = ops::add_documents(&handle, &docs).await?;
+    let count = ops::add_documents(&handle, docs).await?;
     Ok(Json(serde_json::json!({ "count": count })))
 }
 

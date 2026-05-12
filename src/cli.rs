@@ -144,7 +144,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
         Commands::BulkAddDocs { index, docs } => {
             let handle = manager.open_index(&index).await?;
             let docs_json: Vec<serde_json::Value> = serde_json::from_str(&docs)?;
-            let count = ops::add_documents(&handle, &docs_json).await?;
+            let count = ops::add_documents(&handle, docs_json).await?;
             ops::commit_index(&handle).await?;
             println!("Bulk added {} documents.", count);
         }
