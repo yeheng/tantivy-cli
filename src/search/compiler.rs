@@ -75,7 +75,7 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
             for q in filter {
                 subqueries.push((
                     Occur::Must,
-                    Box::new(ConstScoreQuery::new(build_es_query(handle, q)?, 1.0)),
+                    Box::new(ConstScoreQuery::new(build_es_query(handle, q)?, 0.0)),
                 ));
             }
             for q in should {
@@ -87,10 +87,15 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
             Ok(Box::new(BooleanQuery::new(subqueries)))
         }
         EsQuery::Match(map) => {
+            if map.len() != 1 {
+                return Err(AppError::Query(
+                    "match query requires exactly one field".to_string(),
+                ));
+            }
             let (field_name, text) = map
                 .iter()
                 .next()
-                .ok_or_else(|| AppError::Query("match query requires a field".to_string()))?;
+                .unwrap();
             let field = handle
                 .schema
                 .get_field(field_name)
@@ -102,10 +107,15 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
             Ok(Box::new(parsed))
         }
         EsQuery::Term(map) => {
+            if map.len() != 1 {
+                return Err(AppError::Query(
+                    "term query requires exactly one field".to_string(),
+                ));
+            }
             let (field_name, value) = map
                 .iter()
                 .next()
-                .ok_or_else(|| AppError::Query("term query requires a field".to_string()))?;
+                .unwrap();
             let field = handle
                 .schema
                 .get_field(field_name)
@@ -115,10 +125,15 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
             Ok(Box::new(TermQuery::new(term, IndexRecordOption::Basic)))
         }
         EsQuery::Range(map) => {
+            if map.len() != 1 {
+                return Err(AppError::Query(
+                    "range query requires exactly one field".to_string(),
+                ));
+            }
             let (field_name, params) = map
                 .iter()
                 .next()
-                .ok_or_else(|| AppError::Query("range query requires a field".to_string()))?;
+                .unwrap();
             let field = handle
                 .schema
                 .get_field(field_name)

@@ -104,7 +104,7 @@ pub enum IndexState {
 #[derive(Clone)]
 pub struct IndexManager {
     base_dir: PathBuf,
-    indexes: DashMap<String, IndexState>,
+    indexes: Arc<DashMap<String, IndexState>>,
 }
 
 impl IndexManager {
@@ -113,7 +113,7 @@ impl IndexManager {
         std::fs::create_dir_all(&base_dir)?;
         Ok(Self {
             base_dir,
-            indexes: DashMap::new(),
+            indexes: Arc::new(DashMap::new()),
         })
     }
 

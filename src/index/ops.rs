@@ -3,8 +3,7 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tantivy::{
-    DocAddress, DocId, Score, SegmentReader, TantivyDocument,
-    collector::{Collector, SegmentCollector},
+    DocAddress, TantivyDocument,
     query::{RangeQuery, TermQuery},
     schema::{IndexRecordOption, OwnedValue, Term},
 };
@@ -325,63 +324,6 @@ pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
     Ok(())
 }
 
-/// Collector that retrieves documents without scoring, for stable pagination.
-struct ListDocsCollector {
-    limit: usize,
-    offset: usize,
-}
-
-impl Collector for ListDocsCollector {
-    type Fruit = Vec<DocAddress>;
-    type Child = ListDocsChildCollector;
-
-    fn for_segment(
-        &self,
-        segment_local_id: u32,
-        _segment: &SegmentReader,
-    ) -> tantivy::Result<Self::Child> {
-        Ok(ListDocsChildCollector {
-            segment_local_id,
-            docs: Vec::new(),
-        })
-    }
-
-    fn requires_scoring(&self) -> bool {
-        false
-    }
-
-    fn merge_fruits(
-        &self,
-        segment_fruits: Vec<(u32, Vec<DocId>)>,
-    ) -> tantivy::Result<Self::Fruit> {
-        let mut result = Vec::new();
-        for (segment_local_id, docs) in segment_fruits {
-            for doc in docs {
-                result.push(DocAddress::new(segment_local_id, doc));
-            }
-        }
-        let start = self.offset.min(result.len());
-        Ok(result.into_iter().skip(start).take(self.limit).collect())
-    }
-}
-
-struct ListDocsChildCollector {
-    segment_local_id: u32,
-    docs: Vec<DocId>,
-}
-
-impl SegmentCollector for ListDocsChildCollector {
-    type Fruit = (u32, Vec<DocId>);
-
-    fn collect(&mut self, doc: DocId, _score: Score) {
-        self.docs.push(doc);
-    }
-
-    fn harvest(self) -> (u32, Vec<DocId>) {
-        (self.segment_local_id, self.docs)
-    }
-}
-
 /// Get document by field value.
 pub async fn get_document(
     handle: &IndexHandle,
@@ -452,16 +394,21 @@ pub struct IndexStats {
 }
 
 pub async fn index_stats(handle: &IndexHandle) -> Result<IndexStats> {
-    let searcher = handle.reader.searcher();
-    let num_docs = searcher.num_docs();
-    let num_segments = searcher.segment_readers().len();
-    let schema_json = serde_json::to_value(&handle.schema)?;
-
-    Ok(IndexStats {
-        num_docs,
-        num_segments,
-        schema: schema_json,
+    let reader = handle.reader.clone();
+    let schema = handle.schema.clone();
+    tokio::task::spawn_blocking(move || {
+        let searcher = reader.searcher();
+        let num_docs = searcher.num_docs();
+        let num_segments = searcher.segment_readers().len();
+        let schema_json = serde_json::to_value(&schema)?;
+        Ok(IndexStats {
+            num_docs,
+            num_segments,
+            schema: schema_json,
+        })
     })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
 }
 
 /// Rebuild the index by committing and merging all segments into one.
@@ -599,10 +546,13 @@ pub async fn list_documents(
             return Ok(Vec::new());
         }
 
-        let doc_addresses: Vec<DocAddress> = searcher.search(
+        let top_docs: Vec<(f32, DocAddress)> = searcher.search(
             &tantivy::query::AllQuery,
-            &ListDocsCollector { limit, offset },
+            &tantivy::collector::TopDocs::with_limit(offset + limit).order_by_score(),
         )?;
+
+        let doc_addresses: Vec<DocAddress> =
+            top_docs.into_iter().skip(offset).map(|(_, addr)| addr).collect();
 
         let mut docs = Vec::with_capacity(doc_addresses.len());
         for doc_address in doc_addresses {
