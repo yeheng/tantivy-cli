@@ -51,7 +51,7 @@ pub fn json_value_to_term(
                 .map_err(|e| AppError::Schema(format!("invalid date: {e}")))?;
             Ok(Term::from_field_date_for_search(
                 field,
-                tantivy::DateTime::from_timestamp_secs(dt.timestamp()),
+                tantivy::DateTime::from_timestamp_micros(dt.timestamp_micros()),
             ))
         }
         _ => Err(AppError::Schema(

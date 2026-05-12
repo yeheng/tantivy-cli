@@ -74,8 +74,8 @@ fn json_value_to_owned_value(
             let dt = s
                 .parse::<chrono::DateTime<chrono::Utc>>()
                 .map_err(|e| AppError::Schema(format!("invalid date: {e}")))?;
-            Ok(OwnedValue::Date(tantivy::DateTime::from_timestamp_secs(
-                dt.timestamp(),
+            Ok(OwnedValue::Date(tantivy::DateTime::from_timestamp_micros(
+                dt.timestamp_micros(),
             )))
         }
         tantivy::schema::FieldType::Facet(_) => {
@@ -154,7 +154,14 @@ pub fn doc_to_json(schema: &tantivy::schema::Schema, doc: &TantivyDocument) -> J
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null),
             OwnedValue::Bool(v) => JsonValue::Bool(v),
-            OwnedValue::Date(v) => JsonValue::String(v.into_timestamp_secs().to_string()),
+            OwnedValue::Date(v) => {
+                let micros = v.into_timestamp_micros();
+                let secs = micros.div_euclid(1_000_000);
+                let rem_micros = micros.rem_euclid(1_000_000);
+                let nsecs = (rem_micros * 1_000) as u32;
+                let dt = chrono::DateTime::from_timestamp(secs, nsecs).unwrap();
+                JsonValue::String(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+            }
             OwnedValue::Facet(v) => JsonValue::String(v.to_string()),
             OwnedValue::Bytes(v) => {
                 use base64::Engine;
@@ -382,7 +389,7 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
         None => return Ok(()),
     };
 
-    let now = tantivy::DateTime::from_timestamp_secs(chrono::Utc::now().timestamp());
+    let now = tantivy::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros());
     let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
     let query = RangeQuery::new(Bound::Unbounded, upper);
 

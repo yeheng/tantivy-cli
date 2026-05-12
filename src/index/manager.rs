@@ -24,7 +24,10 @@ fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
 /// Commands sent to the per-index writer actor.
 pub enum IndexCommand {
     AddDoc(TantivyDocument, tokio::sync::oneshot::Sender<Result<()>>),
-    AddDocs(Vec<TantivyDocument>, tokio::sync::oneshot::Sender<Result<usize>>),
+    AddDocs(
+        Vec<TantivyDocument>,
+        tokio::sync::oneshot::Sender<Result<usize>>,
+    ),
     DeleteTerm(
         tantivy::schema::Term,
         tokio::sync::oneshot::Sender<Result<()>>,
@@ -72,9 +75,7 @@ impl IndexManager {
         schema_def: &SchemaDef,
     ) -> Result<Arc<IndexHandle>> {
         match self.indexes.entry(name.to_string()) {
-            Entry::Occupied(_) => {
-                return Err(AppError::IndexAlreadyExists(name.to_string()));
-            }
+            Entry::Occupied(_) => Err(AppError::IndexAlreadyExists(name.to_string())),
             Entry::Vacant(entry) => {
                 let index_dir = self.base_dir.join(name);
                 if index_dir.exists() {
@@ -194,8 +195,8 @@ impl IndexManager {
 
 fn spawn_writer_actor(index: Index) -> mpsc::Sender<IndexCommand> {
     let (tx, mut rx) = mpsc::channel::<IndexCommand>(1024);
-    tokio::spawn(async move {
-        let mut writer: IndexWriter = match index.writer::<TantivyDocument>(15_000_000) {
+    std::thread::spawn(move || {
+        let mut writer: IndexWriter = match index.writer::<TantivyDocument>(50_000_000) {
             Ok(w) => w,
             Err(e) => {
                 tracing::error!(error = %e, "failed to create IndexWriter");
@@ -203,7 +204,7 @@ fn spawn_writer_actor(index: Index) -> mpsc::Sender<IndexCommand> {
             }
         };
         let mut dirty = false;
-        while let Some(cmd) = rx.recv().await {
+        while let Some(cmd) = rx.blocking_recv() {
             match cmd {
                 IndexCommand::AddDoc(doc, reply) => {
                     let res = writer

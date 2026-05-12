@@ -136,7 +136,10 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             let handle = manager.open_index(&index).await?;
             ops::delete_documents(&handle, &field, &value).await?;
             ops::commit_index(&handle).await?;
-            println!("Deletion scheduled for field='{}' value='{}'.", field, value);
+            println!(
+                "Deletion scheduled for field='{}' value='{}'.",
+                field, value
+            );
         }
         Commands::BulkAddDocs { index, docs } => {
             let handle = manager.open_index(&index).await?;
