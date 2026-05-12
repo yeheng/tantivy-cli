@@ -5,7 +5,6 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use tantivy::schema::{Field, FieldType, Schema};
 use tantivy::{Index, IndexBuilder, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
-use tokio::sync::mpsc;
 
 use crate::error::{AppError, Result};
 use crate::index::schema::SchemaDef;
@@ -21,33 +20,21 @@ fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
     })
 }
 
-/// Commands sent to the per-index writer actor.
-pub enum IndexCommand {
-    AddDoc(TantivyDocument, tokio::sync::oneshot::Sender<Result<()>>),
-    AddDocs(
-        Vec<TantivyDocument>,
-        tokio::sync::oneshot::Sender<Result<usize>>,
-    ),
-    DeleteTerm(
-        tantivy::schema::Term,
-        tokio::sync::oneshot::Sender<Result<()>>,
-    ),
-    Commit(tokio::sync::oneshot::Sender<Result<()>>),
-    Rebuild(tokio::sync::oneshot::Sender<Result<()>>),
-    CleanupExpired(
-        Box<dyn tantivy::query::Query + Send + Sync>,
-        tokio::sync::oneshot::Sender<Result<()>>,
-    ),
+const WRITER_HEAP_BYTES: usize = 15_000_000;
+
+pub struct ManagedWriter {
+    pub writer: Option<IndexWriter>,
+    pub dirty: bool,
 }
 
-/// Holds an opened index together with its writer channel and reader.
+/// Holds an opened index together with its shared writer mutex and reader.
 pub struct IndexHandle {
     pub name: String,
     pub index: Index,
     pub schema: Schema,
     pub reader: IndexReader,
-    /// Sender to the single writer actor for this index.
-    pub writer_tx: mpsc::Sender<IndexCommand>,
+    /// Shared mutex-protected writer.
+    pub writer: Arc<std::sync::Mutex<ManagedWriter>>,
     /// If the schema contains an `expired_at` date field, document expiration is enabled.
     pub expired_at_field: Option<Field>,
 }
@@ -93,14 +80,18 @@ impl IndexManager {
                     .reload_policy(ReloadPolicy::OnCommitWithDelay)
                     .try_into()?;
 
-                let writer_tx = spawn_writer_actor(index.clone());
+                let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
+                let managed = Arc::new(std::sync::Mutex::new(ManagedWriter {
+                    writer: Some(writer),
+                    dirty: false,
+                }));
 
                 let handle = Arc::new(IndexHandle {
                     name: name.to_string(),
                     index,
                     schema: schema.clone(),
                     reader,
-                    writer_tx,
+                    writer: managed,
                     expired_at_field: resolve_expired_at_field(&schema),
                 });
 
@@ -126,14 +117,18 @@ impl IndexManager {
                     .reload_policy(ReloadPolicy::OnCommitWithDelay)
                     .try_into()?;
 
-                let writer_tx = spawn_writer_actor(index.clone());
+                let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
+                let managed = Arc::new(std::sync::Mutex::new(ManagedWriter {
+                    writer: Some(writer),
+                    dirty: false,
+                }));
 
                 let handle = Arc::new(IndexHandle {
                     name: name.to_string(),
                     index,
                     schema: schema.clone(),
                     reader,
-                    writer_tx,
+                    writer: managed,
                     expired_at_field: resolve_expired_at_field(&schema),
                 });
 
@@ -144,7 +139,12 @@ impl IndexManager {
     }
 
     pub async fn delete_index(&self, name: &str) -> Result<()> {
-        self.indexes.remove(name);
+        if let Some((_, handle)) = self.indexes.remove(name) {
+            let mut managed = handle.writer.lock().unwrap();
+            managed.writer.take(); // drop IndexWriter, releasing file locks
+            drop(managed);
+            drop(handle);
+        }
         let index_dir = self.base_dir.join(name);
         if index_dir.exists() {
             tokio::fs::remove_dir_all(&index_dir).await?;
@@ -168,111 +168,49 @@ impl IndexManager {
             if path.is_dir() {
                 let name = path.file_name().unwrap().to_string_lossy().to_string();
                 if let Entry::Vacant(vacant) = self.indexes.entry(name.clone()) {
-                    if let Ok(index) = Index::open_in_dir(&path) {
-                        let schema = index.schema();
-                        let reader = index
-                            .reader_builder()
-                            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-                            .try_into()?;
-                        let writer_tx = spawn_writer_actor(index.clone());
-                        let handle = Arc::new(IndexHandle {
-                            name: name.clone(),
-                            index,
-                            schema: schema.clone(),
-                            reader,
-                            writer_tx,
-                            expired_at_field: resolve_expired_at_field(&schema),
-                        });
-                        vacant.insert(handle);
-                        loaded.push(name);
-                    }
+                    let index = match Index::open_in_dir(&path) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            tracing::warn!(index = %name, error = %e, "failed to open index");
+                            continue;
+                        }
+                    };
+                    let schema = index.schema();
+                    let reader = match index
+                        .reader_builder()
+                        .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                        .try_into()
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(index = %name, error = %e, "failed to build reader");
+                            continue;
+                        }
+                    };
+                    let writer = match index.writer::<TantivyDocument>(WRITER_HEAP_BYTES) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            tracing::warn!(index = %name, error = %e, "failed to create writer");
+                            continue;
+                        }
+                    };
+                    let managed = Arc::new(std::sync::Mutex::new(ManagedWriter {
+                        writer: Some(writer),
+                        dirty: false,
+                    }));
+                    let handle = Arc::new(IndexHandle {
+                        name: name.clone(),
+                        index,
+                        schema: schema.clone(),
+                        reader,
+                        writer: managed,
+                        expired_at_field: resolve_expired_at_field(&schema),
+                    });
+                    vacant.insert(handle);
+                    loaded.push(name);
                 }
             }
         }
         Ok(loaded)
     }
-}
-
-fn spawn_writer_actor(index: Index) -> mpsc::Sender<IndexCommand> {
-    let (tx, mut rx) = mpsc::channel::<IndexCommand>(1024);
-    std::thread::spawn(move || {
-        let mut writer: IndexWriter = match index.writer::<TantivyDocument>(50_000_000) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to create IndexWriter");
-                return;
-            }
-        };
-        let mut dirty = false;
-        while let Some(cmd) = rx.blocking_recv() {
-            match cmd {
-                IndexCommand::AddDoc(doc, reply) => {
-                    let res = writer
-                        .add_document(doc)
-                        .map(|_| ())
-                        .map_err(AppError::Tantivy);
-                    if res.is_ok() {
-                        dirty = true;
-                    }
-                    let _ = reply.send(res);
-                }
-                IndexCommand::AddDocs(docs, reply) => {
-                    let mut count = 0usize;
-                    let mut err = None;
-                    for doc in docs {
-                        if let Err(e) = writer.add_document(doc) {
-                            err = Some(AppError::Tantivy(e));
-                            break;
-                        }
-                        count += 1;
-                        dirty = true;
-                    }
-                    let res = match err {
-                        Some(e) => Err(e),
-                        None => Ok(count),
-                    };
-                    let _ = reply.send(res);
-                }
-                IndexCommand::DeleteTerm(term, reply) => {
-                    writer.delete_term(term);
-                    dirty = true;
-                    let _ = reply.send(Ok(()));
-                }
-                IndexCommand::Commit(reply) => {
-                    if dirty {
-                        let res = writer.commit().map(|_| ()).map_err(AppError::Tantivy);
-                        dirty = false;
-                        let _ = reply.send(res);
-                    } else {
-                        let _ = reply.send(Ok(()));
-                    }
-                }
-                IndexCommand::Rebuild(reply) => {
-                    let res = (|| -> Result<()> {
-                        writer.commit()?;
-                        let segments = index.searchable_segments()?;
-                        let segment_ids: Vec<_> = segments.iter().map(|s| s.id()).collect();
-                        if segment_ids.len() > 1 {
-                            let merge_result = writer.merge(&segment_ids);
-                            merge_result.wait()?;
-                        }
-                        Ok(())
-                    })();
-                    dirty = false;
-                    let _ = reply.send(res);
-                }
-                IndexCommand::CleanupExpired(query, reply) => {
-                    let res = (|| -> Result<()> {
-                        writer.delete_query(query)?;
-                        writer.commit()?;
-                        Ok(())
-                    })();
-                    dirty = false;
-                    let _ = reply.send(res);
-                }
-            }
-        }
-        tracing::info!("writer actor shutting down");
-    });
-    tx
 }

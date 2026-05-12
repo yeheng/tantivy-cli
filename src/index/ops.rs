@@ -201,14 +201,19 @@ pub fn doc_to_json(schema: &tantivy::schema::Schema, doc: &TantivyDocument) -> J
 /// Add or update a document (does NOT commit).
 pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<String> {
     let doc = json_to_doc(&handle.schema, doc_json)?;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle
-        .writer_tx
-        .send(crate::index::manager::IndexCommand::AddDoc(doc, tx))
-        .await
-        .map_err(|_| AppError::Internal("writer closed".to_string()))?;
-    rx.await
-        .map_err(|_| AppError::Internal("writer dropped".to_string()))??;
+    let writer = handle.writer.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut managed = writer.lock().unwrap();
+        managed
+            .writer
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+            .add_document(doc)?;
+        managed.dirty = true;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
 
     let id = doc_json
         .get("id")
@@ -218,7 +223,7 @@ pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<
     Ok(id)
 }
 
-/// Add multiple documents in a single actor message (does NOT commit).
+/// Add multiple documents in a single operation (does NOT commit).
 /// Returns the number of documents successfully queued.
 pub async fn add_documents(handle: &IndexHandle, docs_json: &[JsonValue]) -> Result<usize> {
     let mut docs = Vec::with_capacity(docs_json.len());
@@ -226,14 +231,23 @@ pub async fn add_documents(handle: &IndexHandle, docs_json: &[JsonValue]) -> Res
         docs.push(json_to_doc(&handle.schema, doc_json)?);
     }
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle
-        .writer_tx
-        .send(crate::index::manager::IndexCommand::AddDocs(docs, tx))
-        .await
-        .map_err(|_| AppError::Internal("writer closed".to_string()))?;
-    rx.await
-        .map_err(|_| AppError::Internal("writer dropped".to_string()))?
+    let writer = handle.writer.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut managed = writer.lock().unwrap();
+        let mut count = 0usize;
+        for doc in docs {
+            managed
+                .writer
+                .as_mut()
+                .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+                .add_document(doc)?;
+            count += 1;
+            managed.dirty = true;
+        }
+        Ok::<usize, AppError>(count)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
 }
 
 /// Delete documents by term query on a given field (does NOT commit).
@@ -275,28 +289,40 @@ pub async fn delete_documents(
         }
     };
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle
-        .writer_tx
-        .send(crate::index::manager::IndexCommand::DeleteTerm(term, tx))
-        .await
-        .map_err(|_| AppError::Internal("writer closed".to_string()))?;
-    rx.await
-        .map_err(|_| AppError::Internal("writer dropped".to_string()))??;
+    let writer = handle.writer.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut managed = writer.lock().unwrap();
+        managed
+            .writer
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+            .delete_term(term);
+        managed.dirty = true;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
 
     Ok(())
 }
 
 /// Commit any pending changes for an index.
 pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle
-        .writer_tx
-        .send(crate::index::manager::IndexCommand::Commit(tx))
-        .await
-        .map_err(|_| AppError::Internal("writer closed".to_string()))?;
-    rx.await
-        .map_err(|_| AppError::Internal("writer dropped".to_string()))??;
+    let writer = handle.writer.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut managed = writer.lock().unwrap();
+        if managed.dirty {
+            managed
+                .writer
+                .as_mut()
+                .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+                .commit()?;
+            managed.dirty = false;
+        }
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
     Ok(())
 }
 
@@ -365,14 +391,30 @@ pub async fn index_stats(handle: &IndexHandle) -> Result<IndexStats> {
 
 /// Rebuild the index by committing and merging all segments into one.
 pub async fn rebuild_index(handle: &IndexHandle) -> Result<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle
-        .writer_tx
-        .send(crate::index::manager::IndexCommand::Rebuild(tx))
-        .await
-        .map_err(|_| AppError::Internal("writer closed".to_string()))?;
-    rx.await
-        .map_err(|_| AppError::Internal("writer dropped".to_string()))??;
+    let index = handle.index.clone();
+    let writer = handle.writer.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut managed = writer.lock().unwrap();
+        managed
+            .writer
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+            .commit()?;
+        let segments = index.searchable_segments()?;
+        let segment_ids: Vec<_> = segments.iter().map(|s| s.id()).collect();
+        if segment_ids.len() > 1 {
+            let w = managed
+                .writer
+                .as_mut()
+                .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+            let merge_result = w.merge(&segment_ids);
+            merge_result.wait()?;
+        }
+        managed.dirty = false;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
     Ok(())
 }
 
@@ -389,21 +431,28 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
         None => return Ok(()),
     };
 
-    let now = tantivy::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros());
-    let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
-    let query = RangeQuery::new(Bound::Unbounded, upper);
+    let writer = handle.writer.clone();
+    tokio::task::spawn_blocking(move || {
+        let now = tantivy::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros());
+        let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
+        let query = RangeQuery::new(Bound::Unbounded, upper);
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle
-        .writer_tx
-        .send(crate::index::manager::IndexCommand::CleanupExpired(
-            Box::new(query),
-            tx,
-        ))
-        .await
-        .map_err(|_| AppError::Internal("writer closed".to_string()))?;
-    rx.await
-        .map_err(|_| AppError::Internal("writer dropped".to_string()))??;
+        let mut managed = writer.lock().unwrap();
+        managed
+            .writer
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+            .delete_query(Box::new(query))?;
+        managed
+            .writer
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
+            .commit()?;
+        managed.dirty = false;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))??;
 
     tracing::info!(index = %handle.name, "cleaned up expired documents");
     Ok(())

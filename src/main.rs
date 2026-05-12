@@ -23,10 +23,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let manager = IndexManager::new(&cli.index_dir)?;
 
-    // Try to load existing indexes eagerly (except for serve which does it lazily)
-    if !matches!(cli.command, cli::Commands::Serve { .. }) {
-        let _ = manager.load_all_indexes();
-    }
+    // Load all existing indexes eagerly so background tasks can see them.
+    let _ = manager.load_all_indexes();
 
     run_cli(cli, &manager).await?;
     Ok(())
