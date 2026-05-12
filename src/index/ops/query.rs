@@ -106,12 +106,13 @@ pub async fn list_documents(
             &tantivy::collector::TopDocs::with_limit(offset + limit).order_by_score(),
         )?;
 
-        let doc_addresses: Vec<DocAddress> =
-            top_docs.into_iter().skip(offset).map(|(_, addr)| addr).collect();
+        if offset >= top_docs.len() {
+            return Ok(Vec::new());
+        }
 
-        let mut docs = Vec::with_capacity(doc_addresses.len());
-        for doc_address in doc_addresses {
-            let doc = searcher.doc::<TantivyDocument>(doc_address)?;
+        let mut docs = Vec::with_capacity(top_docs.len() - offset);
+        for (_, doc_address) in &top_docs[offset..] {
+            let doc = searcher.doc::<TantivyDocument>(*doc_address)?;
             docs.push(doc_to_json(&schema, &doc));
         }
         Ok(docs)
