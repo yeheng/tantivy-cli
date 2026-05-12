@@ -431,24 +431,29 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
         None => return Ok(()),
     };
 
+    let now = tantivy::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros());
+    let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
+
+    // Fast path: check if there are any expired documents before acquiring
+    // the writer lock or performing any disk I/O.
+    let searcher = handle.reader.searcher();
+    let count = searcher.search(
+        &RangeQuery::new(Bound::Unbounded, upper.clone()),
+        &tantivy::collector::Count,
+    )?;
+    if count == 0 {
+        return Ok(());
+    }
+
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
-        let now = tantivy::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros());
-        let upper = Bound::Excluded(Term::from_field_date_for_search(field, now));
-        let query = RangeQuery::new(Bound::Unbounded, upper);
-
         let mut managed = writer.lock().unwrap();
         managed
             .writer
             .as_mut()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
-            .delete_query(Box::new(query))?;
-        managed
-            .writer
-            .as_mut()
-            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
-            .commit()?;
-        managed.dirty = false;
+            .delete_query(Box::new(RangeQuery::new(Bound::Unbounded, upper)))?;
+        managed.dirty = true;
         Ok::<(), AppError>(())
     })
     .await
