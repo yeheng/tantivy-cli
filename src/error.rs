@@ -22,6 +22,9 @@ pub enum AppError {
     #[error("Index already exists: {0}")]
     IndexAlreadyExists(String),
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Field not found: {0}")]
     FieldNotFound(String),
 
@@ -77,8 +80,8 @@ impl IntoResponse for AppError {
             AppError::IndexNotFound(_) | AppError::DocNotFound(_) | AppError::FieldNotFound(_) => {
                 (StatusCode::NOT_FOUND, self.to_string())
             }
-            // 409 only for resources that already exist
-            AppError::IndexAlreadyExists(_) => {
+            // 409 for conflicts
+            AppError::IndexAlreadyExists(_) | AppError::Conflict(_) => {
                 (StatusCode::CONFLICT, self.to_string())
             }
             // 400 for bad requests: schema issues, query syntax errors, bad input

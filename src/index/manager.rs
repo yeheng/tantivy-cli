@@ -1,105 +1,23 @@
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tantivy::schema::{Field, FieldType, Schema};
-use tantivy::{Index, IndexBuilder, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
-use tokio::sync::RwLock;
+use tantivy::{Index, IndexBuilder, ReloadPolicy, TantivyDocument};
 
 use crate::error::{AppError, Result};
 use crate::index::schema::SchemaDef;
 
-fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
-    schema.get_field("expired_at").ok().and_then(|field| {
-        let entry = schema.get_field_entry(field);
-        if matches!(entry.field_type(), FieldType::Date(_)) {
-            Some(field)
-        } else {
-            None
-        }
-    })
-}
-
 const WRITER_HEAP_BYTES: usize = 15_000_000;
 
-/// Validate that an index name is a safe identifier.
-/// Only ASCII alphanumeric characters, underscores, and hyphens are allowed.
-pub fn validate_index_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(AppError::BadRequest("index name cannot be empty".to_string()));
-    }
-    if name.len() > 255 {
-        return Err(AppError::BadRequest("index name too long (max 255 chars)".to_string()));
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        return Err(AppError::BadRequest(
-            "index name contains invalid characters (allowed: a-z, A-Z, 0-9, _, -)".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Build the absolute path for an index directory and verify it stays within base_dir.
-fn safe_index_path(base_dir: &Path, name: &str) -> Result<PathBuf> {
-    validate_index_name(name)?;
-    let path = base_dir.join(name);
-    let canonical_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.to_path_buf());
-    let resolved = canonical_base.join(name);
-    if !resolved.starts_with(&canonical_base) {
-        return Err(AppError::BadRequest("invalid index name".to_string()));
-    }
-    Ok(path)
-}
-
-pub struct ManagedWriter {
-    pub writer: Option<IndexWriter>,
-    pub dirty: AtomicBool,
-}
-
-impl std::fmt::Debug for ManagedWriter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ManagedWriter")
-            .field("has_writer", &self.writer.is_some())
-            .field("dirty", &self.dirty.load(Ordering::Relaxed))
-            .finish()
-    }
-}
-
-/// Holds an opened index together with its shared writer lock and reader.
-pub struct IndexHandle {
-    pub name: String,
-    pub index: Index,
-    pub schema: Schema,
-    pub reader: IndexReader,
-    /// Shared RwLock-protected writer.
-    pub writer: Arc<RwLock<ManagedWriter>>,
-    /// If the schema contains an `expired_at` date field, document expiration is enabled.
-    pub expired_at_field: Option<Field>,
-}
-
-impl std::fmt::Debug for IndexHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IndexHandle")
-            .field("name", &self.name)
-            .field("schema", &self.schema)
-            .field("expired_at_field", &self.expired_at_field)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Lifecycle state of an index within the manager.
-#[derive(Clone)]
-pub enum IndexState {
-    Active(Arc<IndexHandle>),
-    Deleting,
-}
+pub use crate::index::handle::{IndexHandle, IndexState, IndexStatus, ManagedWriter};
+pub use crate::index::ops::validate_index_name;
 
 /// Manages multiple indexes dynamically.
 #[derive(Clone)]
 pub struct IndexManager {
-    base_dir: PathBuf,
+    base_dir: std::path::PathBuf,
     indexes: Arc<DashMap<String, IndexState>>,
+    open_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl IndexManager {
@@ -109,6 +27,7 @@ impl IndexManager {
         Ok(Self {
             base_dir,
             indexes: Arc::new(DashMap::new()),
+            open_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -128,7 +47,7 @@ impl IndexManager {
         let name_for_insert = name.clone();
         let schema_def = schema_def.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            let index_dir = safe_index_path(&base_dir, &name)?;
+            let index_dir = crate::index::ops::safe_index_path(&base_dir, &name)?;
             if index_dir.exists() {
                 return Err(AppError::IndexAlreadyExists(name.to_string()));
             }
@@ -145,9 +64,9 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let managed = Arc::new(RwLock::new(ManagedWriter {
+            let managed = Arc::new(std::sync::RwLock::new(ManagedWriter {
                 writer: Some(writer),
-                dirty: AtomicBool::new(false),
+                dirty: std::sync::atomic::AtomicBool::new(false),
             }));
 
             let handle = Arc::new(IndexHandle {
@@ -156,7 +75,8 @@ impl IndexManager {
                 schema: schema.clone(),
                 reader,
                 writer: managed,
-                expired_at_field: resolve_expired_at_field(&schema),
+                expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
+                status: Arc::new(std::sync::RwLock::new(IndexStatus::Idle)),
             });
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
@@ -173,6 +93,18 @@ impl IndexManager {
     pub async fn open_index(&self, name: &str) -> Result<Arc<IndexHandle>> {
         validate_index_name(name)?;
 
+        // Fast path
+        if let Some(state) = self.indexes.get(name) {
+            return match state.value() {
+                IndexState::Active(handle) => Ok(handle.clone()),
+                IndexState::Deleting => Err(AppError::IndexNotFound(name.to_string())),
+            };
+        }
+
+        // Slow path: serialize index initialization with a global lock.
+        let _guard = self.open_lock.lock().await;
+
+        // Double-checked locking
         if let Some(state) = self.indexes.get(name) {
             return match state.value() {
                 IndexState::Active(handle) => Ok(handle.clone()),
@@ -184,7 +116,7 @@ impl IndexManager {
         let name = name.to_string();
         let name_for_insert = name.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            let index_dir = safe_index_path(&base_dir, &name)?;
+            let index_dir = crate::index::ops::safe_index_path(&base_dir, &name)?;
             if !index_dir.exists() {
                 return Err(AppError::IndexNotFound(name.to_string()));
             }
@@ -197,9 +129,9 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let managed = Arc::new(RwLock::new(ManagedWriter {
+            let managed = Arc::new(std::sync::RwLock::new(ManagedWriter {
                 writer: Some(writer),
-                dirty: AtomicBool::new(false),
+                dirty: std::sync::atomic::AtomicBool::new(false),
             }));
 
             let handle = Arc::new(IndexHandle {
@@ -208,7 +140,8 @@ impl IndexManager {
                 schema: schema.clone(),
                 reader,
                 writer: managed,
-                expired_at_field: resolve_expired_at_field(&schema),
+                expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
+                status: Arc::new(std::sync::RwLock::new(IndexStatus::Idle)),
             });
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
@@ -247,13 +180,13 @@ impl IndexManager {
         let name_for_remove = name.clone();
         let delete_result = tokio::task::spawn_blocking(move || {
             if let Some(handle) = handle {
-                let mut managed = handle.writer.blocking_write();
+                let mut managed = handle.writer.write().unwrap();
                 managed.writer.take(); // drop IndexWriter, releasing file locks
                 drop(managed);
                 drop(handle);
             }
 
-            let index_dir = safe_index_path(&base_dir, &name)?;
+            let index_dir = crate::index::ops::safe_index_path(&base_dir, &name)?;
             if index_dir.exists() {
                 std::fs::remove_dir_all(&index_dir)?;
             }
@@ -341,9 +274,9 @@ impl IndexManager {
                             continue;
                         }
                     };
-                    let managed = Arc::new(RwLock::new(ManagedWriter {
+                    let managed = Arc::new(std::sync::RwLock::new(ManagedWriter {
                         writer: Some(writer),
-                        dirty: AtomicBool::new(false),
+                        dirty: std::sync::atomic::AtomicBool::new(false),
                     }));
                     let handle = Arc::new(IndexHandle {
                         name: name.clone(),
@@ -351,7 +284,8 @@ impl IndexManager {
                         schema: schema.clone(),
                         reader,
                         writer: managed,
-                        expired_at_field: resolve_expired_at_field(&schema),
+                        expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
+                        status: Arc::new(std::sync::RwLock::new(IndexStatus::Idle)),
                     });
                     handles.push((name, handle));
                 }
@@ -381,7 +315,8 @@ mod tests {
 
     use tokio::task::JoinSet;
 
-    use crate::index::manager::{IndexManager, validate_index_name};
+    use crate::index::manager::IndexManager;
+    use crate::index::ops::validate_index_name;
     use crate::index::schema::{FieldDef, FieldKind, SchemaDef};
 
     fn test_schema() -> SchemaDef {
@@ -498,25 +433,14 @@ mod tests {
             set.spawn(async move { mgr.open_index("test").await });
         }
 
-        let mut successes = 0;
         let mut writer_ptrs = Vec::new();
         while let Some(res) = set.join_next().await {
-            match res.unwrap() {
-                Ok(handle) => {
-                    successes += 1;
-                    writer_ptrs.push(Arc::as_ptr(&handle.writer));
-                }
-                Err(_) => {
-                    // LockBusy is acceptable for racing open_index calls
-                }
-            }
+            let handle = res.unwrap().unwrap();
+            writer_ptrs.push(Arc::as_ptr(&handle.writer));
         }
 
-        // At least one must succeed, and all successes must share the same writer.
-        assert!(
-            successes >= 1,
-            "at least one concurrent open_index must succeed"
-        );
+        // All concurrent opens must succeed and share the exact same writer.
+        assert_eq!(writer_ptrs.len(), 5, "all concurrent open_index calls must succeed");
         let first = writer_ptrs[0];
         for ptr in &writer_ptrs {
             assert_eq!(*ptr, first, "all successful opens must share the same writer");

@@ -4,7 +4,7 @@ use tantivy::{DocAddress, TantivyDocument};
 
 use crate::error::Result;
 use crate::index::manager::IndexHandle;
-use crate::index::ops::doc_to_json;
+use crate::index::doc::doc_to_json;
 use crate::search::model::{EsSearchRequest, SearchHit};
 
 /// Trait to abstract over `TopDocs` collector results.
