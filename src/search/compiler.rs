@@ -1,10 +1,25 @@
+use std::collections::HashMap;
+
 use tantivy::query::{AllQuery, BooleanQuery, ConstScoreQuery, Occur, QueryParser, RangeQuery, TermQuery};
-use tantivy::schema::{FieldType, IndexRecordOption};
+use tantivy::schema::IndexRecordOption;
 
 use crate::error::{AppError, Result};
 use crate::index::doc::json_value_to_term;
 use crate::index::manager::IndexHandle;
 use crate::search::model::{EsQuery, EsSearchRequest};
+
+fn take_single_field<T: Clone>(
+    map: &HashMap<String, T>,
+    query_type: &str,
+) -> Result<(String, T)> {
+    if map.len() != 1 {
+        return Err(AppError::Query(format!(
+            "{query_type} query requires exactly one field"
+        )));
+    }
+    let (k, v) = map.iter().next().unwrap();
+    Ok((k.clone(), v.clone()))
+}
 
 pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tantivy::query::Query>> {
     match q {
@@ -33,56 +48,32 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
             Ok(Box::new(BooleanQuery::new(subqueries)))
         }
         EsQuery::Match(map) => {
-            if map.len() != 1 {
-                return Err(AppError::Query(
-                    "match query requires exactly one field".to_string(),
-                ));
-            }
-            let (field_name, text) = map
-                .iter()
-                .next()
-                .unwrap();
+            let (field_name, text) = take_single_field(map, "match")?;
             let field = handle
                 .schema
-                .get_field(field_name)
+                .get_field(&field_name)
                 .map_err(|_| AppError::FieldNotFound(field_name.clone()))?;
             let query_parser = QueryParser::for_index(&handle.index, vec![field]);
             let parsed = query_parser
-                .parse_query(text)
+                .parse_query(&text)
                 .map_err(|e| AppError::Query(e.to_string()))?;
             Ok(Box::new(parsed))
         }
         EsQuery::Term(map) => {
-            if map.len() != 1 {
-                return Err(AppError::Query(
-                    "term query requires exactly one field".to_string(),
-                ));
-            }
-            let (field_name, value) = map
-                .iter()
-                .next()
-                .unwrap();
+            let (field_name, value) = take_single_field(map, "term")?;
             let field = handle
                 .schema
-                .get_field(field_name)
+                .get_field(&field_name)
                 .map_err(|_| AppError::FieldNotFound(field_name.clone()))?;
             let entry = handle.schema.get_field_entry(field);
-            let term = json_value_to_term(field, value, entry.field_type())?;
+            let term = json_value_to_term(field, &value, entry.field_type())?;
             Ok(Box::new(TermQuery::new(term, IndexRecordOption::Basic)))
         }
         EsQuery::Range(map) => {
-            if map.len() != 1 {
-                return Err(AppError::Query(
-                    "range query requires exactly one field".to_string(),
-                ));
-            }
-            let (field_name, params) = map
-                .iter()
-                .next()
-                .unwrap();
+            let (field_name, params) = take_single_field(map, "range")?;
             let field = handle
                 .schema
-                .get_field(field_name)
+                .get_field(&field_name)
                 .map_err(|_| AppError::FieldNotFound(field_name.clone()))?;
             let entry = handle.schema.get_field_entry(field);
             let ft = entry.field_type();
@@ -109,16 +100,10 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
             Ok(Box::new(RangeQuery::new(lower, upper)))
         }
         EsQuery::QueryString { query: qstr } => {
-            let text_fields: Vec<_> = handle
-                .schema
-                .fields()
-                .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
-                .map(|(field, _)| field)
-                .collect();
-            if text_fields.is_empty() {
+            if handle.text_fields.is_empty() {
                 return Err(AppError::Schema("no text fields to search".to_string()));
             }
-            let query_parser = QueryParser::for_index(&handle.index, text_fields);
+            let query_parser = QueryParser::for_index(&handle.index, handle.text_fields.clone());
             let parsed = query_parser
                 .parse_query(qstr)
                 .map_err(|e| AppError::Query(e.to_string()))?;

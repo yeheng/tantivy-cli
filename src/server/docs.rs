@@ -29,7 +29,7 @@ pub async fn add_doc(
     Json(doc): Json<JsonValue>,
 ) -> Result<Json<JsonValue>> {
     let handle = state.manager.open_index(&name).await?;
-    let id = ops::add_document(&handle, &doc).await?;
+    let id = ops::add_document(handle, &doc).await?;
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
@@ -39,7 +39,7 @@ pub async fn bulk_add_docs(
     Json(docs): Json<Vec<JsonValue>>,
 ) -> Result<Json<JsonValue>> {
     let handle = state.manager.open_index(&name).await?;
-    let count = ops::add_documents(&handle, docs).await?;
+    let count = ops::add_documents(handle, docs).await?;
     Ok(Json(serde_json::json!({ "count": count })))
 }
 
@@ -49,7 +49,7 @@ pub async fn list_docs(
     Query(q): Query<ListDocsQuery>,
 ) -> Result<Json<Vec<JsonValue>>> {
     let handle = state.manager.open_index(&name).await?;
-    let docs = ops::list_documents(&handle, q.limit, q.offset).await?;
+    let docs = ops::list_documents(handle, q.limit, q.offset).await?;
     Ok(Json(docs))
 }
 
@@ -58,7 +58,7 @@ pub async fn get_doc(
     Path((name, field, value)): Path<(String, String, String)>,
 ) -> Result<Json<JsonValue>> {
     let handle = state.manager.open_index(&name).await?;
-    let doc = ops::get_document(&handle, &field, &value).await?;
+    let doc = ops::get_document(handle, &field, &value).await?;
     Ok(Json(doc))
 }
 
@@ -67,7 +67,7 @@ pub async fn delete_doc(
     Path((name, field, value)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse> {
     let handle = state.manager.open_index(&name).await?;
-    ops::delete_documents(&handle, &field, &value).await?;
+    ops::delete_documents(handle, &field, &value).await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({ "status": "scheduled" })),

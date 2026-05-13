@@ -18,13 +18,13 @@ pub async fn index_stats(
 ) -> Result<Json<serde_json::Value>> {
     let handle = state.manager.open_index(&name).await?;
 
+    let mut stats = ops::index_stats(handle.clone()).await?;
     let status = handle.status.load(Ordering::Acquire);
-    if status == IndexStatus::REBUILDING_U8 {
-        return Ok(Json(serde_json::json!({ "status": "rebuilding" })));
+    if IndexStatus::from_u8(status) == Some(IndexStatus::Rebuilding) {
+        stats.status = Some("rebuilding".to_string());
     }
 
-    let stats = ops::index_stats(&handle).await?;
-    Ok(Json(serde_json::to_value(stats).unwrap()))
+    Ok(Json(serde_json::to_value(stats)?))
 }
 
 pub async fn rebuild_index(
@@ -44,7 +44,7 @@ pub async fn compress_index(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse> {
     let handle = state.manager.open_index(&name).await?;
-    ops::compress_index(&handle).await?;
+    ops::compress_index(handle).await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({ "status": "compressed" })),

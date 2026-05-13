@@ -115,8 +115,8 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
         Commands::AddDoc { index, doc } => {
             let handle = manager.open_index(&index).await?;
             let doc_json: serde_json::Value = serde_json::from_str(&doc)?;
-            let id = ops::add_document(&handle, &doc_json).await?;
-            ops::commit_index(&handle).await?;
+            let id = ops::add_document(handle.clone(), &doc_json).await?;
+            ops::commit_index(handle).await?;
             println!("Document added: {}", id);
         }
         Commands::GetDoc {
@@ -125,7 +125,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             value,
         } => {
             let handle = manager.open_index(&index).await?;
-            let doc = ops::get_document(&handle, &field, &value).await?;
+            let doc = ops::get_document(handle, &field, &value).await?;
             println!("{}", serde_json::to_string_pretty(&doc)?);
         }
         Commands::DeleteDoc {
@@ -134,8 +134,8 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             value,
         } => {
             let handle = manager.open_index(&index).await?;
-            ops::delete_documents(&handle, &field, &value).await?;
-            ops::commit_index(&handle).await?;
+            ops::delete_documents(handle.clone(), &field, &value).await?;
+            ops::commit_index(handle).await?;
             println!(
                 "Deletion scheduled for field='{}' value='{}'.",
                 field, value
@@ -144,8 +144,8 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
         Commands::BulkAddDocs { index, docs } => {
             let handle = manager.open_index(&index).await?;
             let docs_json: Vec<serde_json::Value> = serde_json::from_str(&docs)?;
-            let count = ops::add_documents(&handle, docs_json).await?;
-            ops::commit_index(&handle).await?;
+            let count = ops::add_documents(handle.clone(), docs_json).await?;
+            ops::commit_index(handle).await?;
             println!("Bulk added {} documents.", count);
         }
         Commands::Search {
@@ -171,17 +171,17 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
         }
         Commands::Stats { index } => {
             let handle = manager.open_index(&index).await?;
-            let stats = ops::index_stats(&handle).await?;
+            let stats = ops::index_stats(handle).await?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }
         Commands::Rebuild { index } => {
             let handle = manager.open_index(&index).await?;
-            ops::rebuild_index(&handle).await?;
+            ops::rebuild_index(handle).await?;
             println!("Index '{}' rebuilt.", index);
         }
         Commands::Compress { index } => {
             let handle = manager.open_index(&index).await?;
-            ops::compress_index(&handle).await?;
+            ops::compress_index(handle).await?;
             println!("Index '{}' compressed.", index);
         }
         Commands::ListDocs {
@@ -190,7 +190,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             offset,
         } => {
             let handle = manager.open_index(&index).await?;
-            let docs = ops::list_documents(&handle, limit, offset).await?;
+            let docs = ops::list_documents(handle, limit, offset).await?;
             println!("{}", serde_json::to_string_pretty(&json!(docs))?);
         }
         Commands::Serve { bind } => {

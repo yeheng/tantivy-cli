@@ -46,17 +46,15 @@ pub fn build_snippet_gens(
     req: &EsSearchRequest,
 ) -> Result<Vec<(String, SnippetGenerator)>> {
     let mut gens = Vec::new();
-    if !req.highlight_fields.is_empty() {
-        for field_name in &req.highlight_fields {
-            if let Ok(field) = handle.schema.get_field(field_name) {
-                if matches!(
-                    handle.schema.get_field_entry(field).field_type(),
-                    tantivy::schema::FieldType::Str(_)
-                ) {
-                    let mut generator = SnippetGenerator::create(searcher, query, field)?;
-                    generator.set_max_num_chars(req.snippet_max_chars);
-                    gens.push((field_name.clone(), generator));
-                }
+    for field_name in &req.highlight_fields {
+        if let Ok(field) = handle.schema.get_field(field_name) {
+            if matches!(
+                handle.schema.get_field_entry(field).field_type(),
+                tantivy::schema::FieldType::Str(_)
+            ) {
+                let mut generator = SnippetGenerator::create(searcher, query, field)?;
+                generator.set_max_num_chars(req.snippet_max_chars);
+                gens.push((field_name.clone(), generator));
             }
         }
     }

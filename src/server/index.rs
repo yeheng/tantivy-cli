@@ -54,7 +54,7 @@ pub async fn get_index_info(
     Path(name): Path<String>,
 ) -> Result<Json<IndexInfo>> {
     let handle = state.manager.open_index(&name).await?;
-    let stats = ops::index_stats(&handle).await?;
+    let stats = ops::index_stats(handle).await?;
     Ok(Json(IndexInfo {
         name,
         num_docs: stats.num_docs,

@@ -90,7 +90,7 @@ impl IntoResponse for AppError {
             }
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal error: {self}"),
+                self.to_string(),
             ),
         };
         let body = Json(json!({ "error": msg }));

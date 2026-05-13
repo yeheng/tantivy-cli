@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use tantivy::schema::FieldType;
 use tantivy::{Index, IndexBuilder, ReloadPolicy, TantivyDocument};
 
 use crate::error::{AppError, Result};
@@ -64,6 +65,11 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
+            let text_fields: Vec<_> = schema
+                .fields()
+                .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
+                .map(|(field, _)| field)
+                .collect();
             let handle = Arc::new(IndexHandle {
                 name: name.clone(),
                 index,
@@ -72,9 +78,10 @@ impl IndexManager {
                 writer: Arc::new(std::sync::RwLock::new(WriterSlot {
                     writer: Some(writer),
                 })),
-                dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                dirty: std::sync::atomic::AtomicBool::new(false),
                 expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                status: Arc::new(std::sync::atomic::AtomicU8::new(IndexStatus::IDLE_U8)),
+                status: std::sync::atomic::AtomicU8::new(IndexStatus::Idle as u8),
+                text_fields,
             });
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
@@ -127,6 +134,11 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
+            let text_fields: Vec<_> = schema
+                .fields()
+                .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
+                .map(|(field, _)| field)
+                .collect();
             let handle = Arc::new(IndexHandle {
                 name: name.clone(),
                 index,
@@ -135,9 +147,10 @@ impl IndexManager {
                 writer: Arc::new(std::sync::RwLock::new(WriterSlot {
                     writer: Some(writer),
                 })),
-                dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                dirty: std::sync::atomic::AtomicBool::new(false),
                 expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                status: Arc::new(std::sync::atomic::AtomicU8::new(IndexStatus::IDLE_U8)),
+                status: std::sync::atomic::AtomicU8::new(IndexStatus::Idle as u8),
+                text_fields,
             });
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
@@ -175,25 +188,47 @@ impl IndexManager {
         let name = name.to_string();
         let name_for_remove = name.clone();
         let delete_result = tokio::task::spawn_blocking(move || {
+            let index_dir = crate::index::ops::safe_index_path(&base_dir, &name)?;
+
+            // Rename directory first so the original name is immediately reusable.
+            let trash_dir = base_dir.join(format!(".deleting_{}_{}", name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
+
             if let Some(handle) = handle {
+                // 1. Release writer lock first, BEFORE any filesystem operations.
                 let mut w = handle.writer.write().unwrap();
                 w.writer.take(); // drop IndexWriter, releasing file locks
                 drop(w);
 
-                // Wait for other Arc references to drop before deleting directory.
+                // 2. Now safe to rename directory (writer no longer holds .tantivy-meta.lock).
+                if index_dir.exists() {
+                    std::fs::rename(&index_dir, &trash_dir)?;
+                }
+
+                // 3. Wait for other Arc references to drop.
                 let start = std::time::Instant::now();
                 while Arc::strong_count(&handle) > 1 {
                     if start.elapsed() > std::time::Duration::from_secs(5) {
-                        tracing::warn!(index = %name, "timeout waiting for index references to drop");
-                        break;
+                        tracing::warn!(index = %name, "timeout waiting for index references to drop; leaving trash directory");
+                        return Ok(());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-            }
 
-            let index_dir = crate::index::ops::safe_index_path(&base_dir, &name)?;
-            if index_dir.exists() {
-                std::fs::remove_dir_all(&index_dir)?;
+                // 4. CRITICAL: drop handle to release reader and its mmap mappings.
+                drop(handle);
+
+                // 5. Now safe to physically delete directory.
+                if trash_dir.exists() {
+                    std::fs::remove_dir_all(&trash_dir)?;
+                }
+            } else {
+                // No active handle: just rename and delete.
+                if index_dir.exists() {
+                    std::fs::rename(&index_dir, &trash_dir)?;
+                }
+                if trash_dir.exists() {
+                    std::fs::remove_dir_all(&trash_dir)?;
+                }
             }
             Ok::<(), AppError>(())
         })
@@ -279,6 +314,11 @@ impl IndexManager {
                             continue;
                         }
                     };
+                    let text_fields: Vec<_> = schema
+                        .fields()
+                        .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
+                        .map(|(field, _)| field)
+                        .collect();
                     let handle = Arc::new(IndexHandle {
                         name: name.clone(),
                         index,
@@ -287,9 +327,10 @@ impl IndexManager {
                         writer: Arc::new(std::sync::RwLock::new(WriterSlot {
                             writer: Some(writer),
                         })),
-                        dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        dirty: std::sync::atomic::AtomicBool::new(false),
                         expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                        status: Arc::new(std::sync::atomic::AtomicU8::new(IndexStatus::IDLE_U8)),
+                        status: std::sync::atomic::AtomicU8::new(IndexStatus::Idle as u8),
+                        text_fields,
                     });
                     handles.push((name, handle));
                 }

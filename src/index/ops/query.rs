@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use serde_json::Value as JsonValue;
 use tantivy::{
-    DocAddress, TantivyDocument,
+    DocAddress, DocId, SegmentReader, TantivyDocument,
+    collector::{Collector, SegmentCollector},
     query::{TermQuery},
     schema::IndexRecordOption,
 };
@@ -9,9 +12,68 @@ use crate::error::{AppError, Result};
 use crate::index::doc::{doc_to_json, str_to_term};
 use crate::index::manager::IndexHandle;
 
+/// Collector that gathers doc addresses without score-based heap ordering.
+/// Used for `list_documents` where `AllQuery` assigns every doc the same score,
+/// making a score-sorted TopDocs a waste of CPU cycles.
+struct ListDocsCollector {
+    limit: usize,
+}
+
+impl Collector for ListDocsCollector {
+    type Fruit = Vec<DocAddress>;
+    type Child = ListDocsSegmentCollector;
+
+    fn for_segment(
+        &self,
+        segment_local_id: u32,
+        _segment: &SegmentReader,
+    ) -> tantivy::Result<ListDocsSegmentCollector> {
+        Ok(ListDocsSegmentCollector {
+            segment_local_id,
+            docs: Vec::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        false
+    }
+
+    fn merge_fruits(
+        &self,
+        segment_fruits: Vec<Vec<DocAddress>>,
+    ) -> tantivy::Result<Vec<DocAddress>> {
+        let mut all = Vec::new();
+        for docs in segment_fruits {
+            all.extend(docs);
+        }
+        all.truncate(self.limit);
+        Ok(all)
+    }
+}
+
+struct ListDocsSegmentCollector {
+    segment_local_id: u32,
+    docs: Vec<DocAddress>,
+}
+
+impl SegmentCollector for ListDocsSegmentCollector {
+    type Fruit = Vec<DocAddress>;
+
+    fn collect(&mut self, doc: DocId, _score: f32) {
+        self.docs.push(DocAddress {
+            segment_ord: self.segment_local_id,
+            doc_id: doc,
+        });
+    }
+
+    fn harvest(self) -> Vec<DocAddress> {
+        self.docs
+    }
+}
+
 /// Get document by field value.
 pub async fn get_document(
-    handle: &IndexHandle,
+    handle: Arc<IndexHandle>,
     field_name: &str,
     term_value: &str,
 ) -> Result<JsonValue> {
@@ -33,11 +95,9 @@ pub async fn get_document(
             &query,
             &tantivy::collector::TopDocs::with_limit(1).order_by_score(),
         )?;
-        let doc = if let Some((_, doc_address)) = top_docs.into_iter().next() {
-            searcher.doc::<TantivyDocument>(doc_address)?
-        } else {
-            return Err(AppError::DocNotFound(term_value));
-        };
+        let (_, doc_address) = top_docs.into_iter().next()
+            .ok_or(AppError::DocNotFound(term_value))?;
+        let doc = searcher.doc::<TantivyDocument>(doc_address)?;
 
         Ok(doc_to_json(&schema, &doc))
     })
@@ -52,14 +112,17 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 /// Note: deep offset is still O(offset) — for true cursor-based pagination,
 /// consider using search with a range query on a fast field.
 pub async fn list_documents(
-    handle: &IndexHandle,
+    handle: Arc<IndexHandle>,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<JsonValue>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    if offset + limit > MAX_RESULT_WINDOW {
+    let window = offset
+        .checked_add(limit)
+        .ok_or_else(|| AppError::BadRequest("offset + limit overflow".to_string()))?;
+    if window > MAX_RESULT_WINDOW {
         return Err(AppError::BadRequest(format!(
             "offset + limit cannot exceed {MAX_RESULT_WINDOW}"
         )));
@@ -75,17 +138,13 @@ pub async fn list_documents(
             return Ok(Vec::new());
         }
 
-        let top_docs: Vec<(f32, DocAddress)> = searcher.search(
+        let doc_addresses: Vec<DocAddress> = searcher.search(
             &tantivy::query::AllQuery,
-            &tantivy::collector::TopDocs::with_limit(offset + limit).order_by_score(),
+            &ListDocsCollector { limit: offset + limit },
         )?;
 
-        if offset >= top_docs.len() {
-            return Ok(Vec::new());
-        }
-
-        let mut docs = Vec::with_capacity(top_docs.len() - offset);
-        for (_, doc_address) in &top_docs[offset..] {
+        let mut docs = Vec::with_capacity(doc_addresses.len().saturating_sub(offset));
+        for doc_address in &doc_addresses[offset..] {
             let doc = searcher.doc::<TantivyDocument>(*doc_address)?;
             docs.push(doc_to_json(&schema, &doc));
         }

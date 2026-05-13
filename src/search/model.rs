@@ -3,6 +3,31 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+#[derive(Debug, Clone)]
+pub struct SortField {
+    pub field: String,
+    pub order: SortOrder,
+}
+
+impl<'de> Deserialize<'de> for SortField {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let map = HashMap::<String, SortOrder>::deserialize(deserializer)?;
+        let mut iter = map.into_iter();
+        let (field, order) = iter.next().ok_or_else(|| {
+            serde::de::Error::custom("sort entry cannot be empty")
+        })?;
+        if iter.next().is_some() {
+            return Err(serde::de::Error::custom(
+                "sort entry must contain exactly one field",
+            ));
+        }
+        Ok(SortField { field, order })
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
@@ -27,7 +52,7 @@ pub struct EsSearchRequest {
     pub size: usize,
     pub query: Option<EsQuery>,
     #[serde(default)]
-    pub sort: Vec<HashMap<String, SortOrder>>,
+    pub sort: Vec<SortField>,
     #[serde(default)]
     pub aggs: Option<tantivy::aggregation::agg_req::Aggregations>,
     #[serde(default)]

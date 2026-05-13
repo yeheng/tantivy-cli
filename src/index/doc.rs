@@ -18,18 +18,18 @@ pub fn json_to_doc(schema: &tantivy::schema::Schema, data: &JsonValue) -> Result
         let field_entry = schema.get_field_entry(field);
         if let JsonValue::Array(arr) = val {
             for item in arr {
-                let owned_val = json_value_to_owned_value(item, field_entry.field_type())?;
+                let owned_val = convert_json_to_field_value(item, field_entry.field_type())?;
                 doc.add_field_value(field, &owned_val);
             }
         } else {
-            let owned_val = json_value_to_owned_value(val, field_entry.field_type())?;
+            let owned_val = convert_json_to_field_value(val, field_entry.field_type())?;
             doc.add_field_value(field, &owned_val);
         }
     }
     Ok(doc)
 }
 
-fn json_value_to_owned_value(
+fn convert_json_to_field_value(
     value: &JsonValue,
     field_type: &tantivy::schema::FieldType,
 ) -> Result<OwnedValue> {
@@ -93,7 +93,7 @@ fn json_value_to_owned_value(
                 .ok_or_else(|| AppError::Schema("expected json object".to_string()))?;
             let mut obj = Vec::new();
             for (k, v) in map {
-                obj.push((k.clone(), json_to_owned_value(v)?));
+                obj.push((k.clone(), json_to_tantivy_value(v)?));
             }
             Ok(OwnedValue::Object(obj))
         }
@@ -101,7 +101,7 @@ fn json_value_to_owned_value(
     }
 }
 
-fn json_to_owned_value(value: &JsonValue) -> Result<OwnedValue> {
+fn json_to_tantivy_value(value: &JsonValue) -> Result<OwnedValue> {
     match value {
         JsonValue::Null => Ok(OwnedValue::Null),
         JsonValue::Bool(b) => Ok(OwnedValue::Bool(*b)),
@@ -120,14 +120,14 @@ fn json_to_owned_value(value: &JsonValue) -> Result<OwnedValue> {
         JsonValue::Array(arr) => {
             let mut vec = Vec::new();
             for v in arr {
-                vec.push(json_to_owned_value(v)?);
+                vec.push(json_to_tantivy_value(v)?);
             }
             Ok(OwnedValue::Array(vec))
         }
         JsonValue::Object(map) => {
             let mut obj = Vec::new();
             for (k, v) in map {
-                obj.push((k.clone(), json_to_owned_value(v)?));
+                obj.push((k.clone(), json_to_tantivy_value(v)?));
             }
             Ok(OwnedValue::Object(obj))
         }
@@ -208,49 +208,46 @@ pub fn json_value_to_term(
     }
 }
 
+fn owned_value_to_json(value: OwnedValue) -> JsonValue {
+    match value {
+        OwnedValue::Str(s) => JsonValue::String(s),
+        OwnedValue::U64(v) => JsonValue::Number(v.into()),
+        OwnedValue::I64(v) => JsonValue::Number(v.into()),
+        OwnedValue::F64(v) => serde_json::Number::from_f64(v)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        OwnedValue::Bool(v) => JsonValue::Bool(v),
+        OwnedValue::Date(v) => {
+            let micros = v.into_timestamp_micros();
+            let secs = micros.div_euclid(1_000_000);
+            let rem_micros = micros.rem_euclid(1_000_000);
+            let nsecs = (rem_micros * 1_000) as u32;
+            match chrono::DateTime::from_timestamp(secs, nsecs) {
+                Some(dt) => JsonValue::String(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)),
+                None => {
+                    tracing::warn!(timestamp_micros = micros, "invalid timestamp from index");
+                    JsonValue::Null
+                }
+            }
+        }
+        OwnedValue::Facet(v) => JsonValue::String(v.to_string()),
+        OwnedValue::Bytes(v) => {
+            use base64::Engine;
+            JsonValue::String(base64::engine::general_purpose::STANDARD.encode(v))
+        }
+        OwnedValue::Array(arr) => JsonValue::Array(arr.into_iter().map(owned_value_to_json).collect()),
+        OwnedValue::Object(obj) => serde_json::to_value(obj).unwrap_or(JsonValue::Null),
+        OwnedValue::PreTokStr(_) | OwnedValue::IpAddr(_) => JsonValue::Null,
+        OwnedValue::Null => JsonValue::Null,
+    }
+}
+
 pub fn doc_to_json(schema: &tantivy::schema::Schema, doc: &TantivyDocument) -> JsonValue {
     let mut map = serde_json::Map::new();
     for (field, value) in doc.field_values() {
         let name = schema.get_field_name(field);
         let owned: OwnedValue = value.into();
-        let json_val = match owned {
-            OwnedValue::Str(s) => JsonValue::String(s),
-            OwnedValue::U64(v) => JsonValue::Number(v.into()),
-            OwnedValue::I64(v) => JsonValue::Number(v.into()),
-            OwnedValue::F64(v) => serde_json::Number::from_f64(v)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null),
-            OwnedValue::Bool(v) => JsonValue::Bool(v),
-            OwnedValue::Date(v) => {
-                let micros = v.into_timestamp_micros();
-                let secs = micros.div_euclid(1_000_000);
-                let rem_micros = micros.rem_euclid(1_000_000);
-                let nsecs = (rem_micros * 1_000) as u32;
-                let dt = chrono::DateTime::from_timestamp(secs, nsecs).unwrap();
-                JsonValue::String(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
-            }
-            OwnedValue::Facet(v) => JsonValue::String(v.to_string()),
-            OwnedValue::Bytes(v) => {
-                use base64::Engine;
-                JsonValue::String(base64::engine::general_purpose::STANDARD.encode(v))
-            }
-            OwnedValue::Array(arr) => JsonValue::Array(
-                arr.into_iter()
-                    .map(|v| match v {
-                        OwnedValue::Str(s) => JsonValue::String(s),
-                        OwnedValue::U64(n) => JsonValue::Number(n.into()),
-                        OwnedValue::I64(n) => JsonValue::Number(n.into()),
-                        OwnedValue::F64(n) => serde_json::Number::from_f64(n)
-                            .map(JsonValue::Number)
-                            .unwrap_or(JsonValue::Null),
-                        OwnedValue::Bool(b) => JsonValue::Bool(b),
-                        _ => JsonValue::Null,
-                    })
-                    .collect(),
-            ),
-            OwnedValue::Object(obj) => serde_json::to_value(obj).unwrap_or(JsonValue::Null),
-            _ => JsonValue::Null,
-        };
+        let json_val = owned_value_to_json(owned);
         if let Some(existing) = map.get_mut(name) {
             if let JsonValue::Array(arr) = existing {
                 arr.push(json_val);

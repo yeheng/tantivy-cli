@@ -31,8 +31,9 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
                 _ = interval.tick() => {
                     let handles = commit_manager.iter_handles();
                     for handle in handles {
-                        if let Err(e) = ops::commit_index(&handle).await {
-                            tracing::error!(index = %handle.name, error = %e, "failed to commit index");
+                        let name = handle.name.clone();
+                        if let Err(e) = ops::commit_index(handle).await {
+                            tracing::error!(index = %name, error = %e, "failed to commit index");
                         }
                     }
                 }
@@ -41,8 +42,9 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
                     // Final commit before exit.
                     let handles = commit_manager.iter_handles();
                     for handle in handles {
-                        if let Err(e) = ops::commit_index(&handle).await {
-                            tracing::error!(index = %handle.name, error = %e, "final commit failed");
+                        let name = handle.name.clone();
+                        if let Err(e) = ops::commit_index(handle).await {
+                            tracing::error!(index = %name, error = %e, "final commit failed");
                         }
                     }
                     break;
@@ -64,8 +66,9 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
                     let handles = cleanup_manager.iter_handles();
                     for handle in handles {
                         if handle.expired_at_field.is_some() {
-                            if let Err(e) = ops::cleanup_expired(&handle).await {
-                                tracing::error!(index = %handle.name, error = %e, "failed to cleanup expired documents");
+                            let name = handle.name.clone();
+                            if let Err(e) = ops::cleanup_expired(handle).await {
+                                tracing::error!(index = %name, error = %e, "failed to cleanup expired documents");
                             }
                         }
                     }
@@ -131,32 +134,43 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
     // Signal background tasks to stop and wait for them.
     cancel.cancel();
     cleanup_cancel.cancel();
-    let _ = commit_handle.await;
-    let _ = cleanup_handle.await;
+    if let Err(e) = commit_handle.await {
+        tracing::error!(error = %e, "commit task panicked or was cancelled");
+    }
+    if let Err(e) = cleanup_handle.await {
+        tracing::error!(error = %e, "cleanup task panicked or was cancelled");
+    }
 
     Ok(())
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => tracing::info!("received Ctrl+C"),
+            Err(e) => tracing::error!(error = %e, "failed to listen for Ctrl+C"),
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+                tracing::info!("received SIGTERM");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await
+            }
+        }
     };
 
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => { tracing::info!("received Ctrl+C"); },
-        _ = terminate => { tracing::info!("received SIGTERM"); },
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }

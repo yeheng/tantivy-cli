@@ -17,15 +17,20 @@ pub fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[repr(u8)]
 pub enum IndexStatus {
-    Idle,
-    Rebuilding,
+    Idle = 0,
+    Rebuilding = 1,
 }
 
 impl IndexStatus {
-    pub const IDLE_U8: u8 = 0;
-    pub const REBUILDING_U8: u8 = 1;
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Idle),
+            1 => Some(Self::Rebuilding),
+            _ => None,
+        }
+    }
 }
 
 /// Manages the lifecycle of an IndexWriter slot.
@@ -42,11 +47,13 @@ pub struct IndexHandle {
     /// Shared writer slot.
     pub writer: Arc<RwLock<WriterSlot>>,
     /// Whether the index has uncommitted writes.
-    pub dirty: Arc<AtomicBool>,
+    pub dirty: AtomicBool,
     /// If the schema contains an `expired_at` date field, document expiration is enabled.
     pub expired_at_field: Option<Field>,
     /// Current lifecycle status of the index (0 = Idle, 1 = Rebuilding).
-    pub status: Arc<AtomicU8>,
+    pub status: AtomicU8,
+    /// Pre-computed list of text fields for QueryString searches.
+    pub text_fields: Vec<Field>,
 }
 
 impl std::fmt::Debug for IndexHandle {
@@ -56,7 +63,7 @@ impl std::fmt::Debug for IndexHandle {
             .field("schema", &self.schema)
             .field("expired_at_field", &self.expired_at_field)
             .field("dirty", &self.dirty.load(Ordering::Relaxed))
-            .field("status", &self.status.load(Ordering::Relaxed))
+            .field("status", &IndexStatus::from_u8(self.status.load(Ordering::Relaxed)))
             .finish_non_exhaustive()
     }
 }

@@ -1,23 +1,23 @@
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
 use crate::error::{AppError, Result};
 use crate::index::doc::{json_to_doc, str_to_term};
 use crate::index::manager::IndexHandle;
 
-/// Add or update a document (does NOT commit).
-pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<String> {
+/// Add a document to the index (does NOT commit).
+pub async fn add_document(handle: Arc<IndexHandle>, doc_json: &JsonValue) -> Result<String> {
     let doc = json_to_doc(&handle.schema, doc_json)?;
-    let writer = handle.writer.clone();
-    let dirty = handle.dirty.clone();
+    let handle = Arc::clone(&handle);
     tokio::task::spawn_blocking(move || {
-        let w = writer.read().unwrap();
+        let w = handle.writer.read().unwrap();
         let writer = w
             .writer
             .as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
         writer.add_document(doc)?;
-        dirty.store(true, Ordering::Release);
+        handle.dirty.store(true, Ordering::Release);
         Ok::<(), AppError>(())
     })
     .await
@@ -26,17 +26,16 @@ pub async fn add_document(handle: &IndexHandle, doc_json: &JsonValue) -> Result<
     let id = doc_json
         .get("id")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .ok_or_else(|| AppError::BadRequest("document must contain a string 'id' field".to_string()))?
         .to_string();
     Ok(id)
 }
 
 /// Add multiple documents in a single operation (does NOT commit).
 /// Returns the number of documents successfully queued.
-pub async fn add_documents(handle: &IndexHandle, docs_json: Vec<JsonValue>) -> Result<usize> {
+pub async fn add_documents(handle: Arc<IndexHandle>, docs_json: Vec<JsonValue>) -> Result<usize> {
     let schema = handle.schema.clone();
-    let writer = handle.writer.clone();
-    let dirty = handle.dirty.clone();
+    let handle = Arc::clone(&handle);
 
     tokio::task::spawn_blocking(move || {
         let mut docs = Vec::with_capacity(docs_json.len());
@@ -44,7 +43,7 @@ pub async fn add_documents(handle: &IndexHandle, docs_json: Vec<JsonValue>) -> R
             docs.push(json_to_doc(&schema, doc_json)?);
         }
 
-        let w = writer.read().unwrap();
+        let w = handle.writer.read().unwrap();
         let writer = w
             .writer
             .as_ref()
@@ -54,7 +53,7 @@ pub async fn add_documents(handle: &IndexHandle, docs_json: Vec<JsonValue>) -> R
             writer.add_document(doc)?;
             count += 1;
         }
-        dirty.store(true, Ordering::Release);
+        handle.dirty.store(true, Ordering::Release);
         Ok::<usize, AppError>(count)
     })
     .await
@@ -63,7 +62,7 @@ pub async fn add_documents(handle: &IndexHandle, docs_json: Vec<JsonValue>) -> R
 
 /// Delete documents by term query on a given field (does NOT commit).
 pub async fn delete_documents(
-    handle: &IndexHandle,
+    handle: Arc<IndexHandle>,
     field_name: &str,
     term_value: &str,
 ) -> Result<()> {
@@ -75,16 +74,15 @@ pub async fn delete_documents(
     let field_entry = handle.schema.get_field_entry(field);
     let term = str_to_term(field, field_entry.field_type(), term_value)?;
 
-    let writer = handle.writer.clone();
-    let dirty = handle.dirty.clone();
+    let handle = Arc::clone(&handle);
     tokio::task::spawn_blocking(move || {
-        let w = writer.read().unwrap();
+        let w = handle.writer.read().unwrap();
         let writer = w
             .writer
             .as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
         writer.delete_term(term);
-        dirty.store(true, Ordering::Release);
+        handle.dirty.store(true, Ordering::Release);
         Ok::<(), AppError>(())
     })
     .await
@@ -93,18 +91,17 @@ pub async fn delete_documents(
 }
 
 /// Commit any pending changes for an index.
-pub async fn commit_index(handle: &IndexHandle) -> Result<()> {
-    let writer = handle.writer.clone();
-    let dirty = handle.dirty.clone();
+pub async fn commit_index(handle: Arc<IndexHandle>) -> Result<()> {
+    let handle = Arc::clone(&handle);
     tokio::task::spawn_blocking(move || {
-        let mut w = writer.write().unwrap();
-        if dirty.load(Ordering::Acquire) {
+        let mut w = handle.writer.write().unwrap();
+        if handle.dirty.load(Ordering::Acquire) {
             let writer = w
                 .writer
                 .as_mut()
                 .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
             writer.commit()?;
-            dirty.store(false, Ordering::Release);
+            handle.dirty.store(false, Ordering::Release);
         }
         Ok::<(), AppError>(())
     })
