@@ -15,31 +15,50 @@ api.interceptors.response.use(
 
 export default api
 
+// Index operations
 export async function listIndexes() {
   const { data } = await api.get('/indexes')
   return data
 }
 
 export async function createIndex(name, schema) {
-  await api.post(`/indexes/${name}`, { schema })
+  const { data } = await api.post(`/indexes/${name}`, { schema })
+  return data
 }
 
 export async function deleteIndex(name) {
   await api.delete(`/indexes/${name}`)
 }
 
+export async function getIndexInfo(name) {
+  const { data } = await api.get(`/indexes/${name}`)
+  return data
+}
+
+// Stats & maintenance
 export async function getIndexStats(name) {
   const { data } = await api.get(`/indexes/${name}/stats`)
   return data
 }
 
-export async function searchIndex(name, q, limit = 10) {
-  const { data } = await api.get(`/indexes/${name}/search`, { params: { q, limit } })
+export async function rebuildIndex(name) {
+  const { data } = await api.post(`/indexes/${name}/rebuild`)
   return data
 }
 
+export async function compressIndex(name) {
+  const { data } = await api.post(`/indexes/${name}/compress`)
+  return data
+}
+
+// Document operations
 export async function addDoc(name, doc) {
   const { data } = await api.post(`/indexes/${name}/docs`, doc)
+  return data
+}
+
+export async function bulkAddDocs(name, docs) {
+  const { data } = await api.post(`/indexes/${name}/docs/_bulk`, docs)
   return data
 }
 
@@ -48,10 +67,25 @@ export async function listDocs(name, limit = 10, offset = 0) {
   return data
 }
 
-export async function rebuildIndex(name) {
-  await api.post(`/indexes/${name}/rebuild`)
+export async function getDoc(name, field, value) {
+  const { data } = await api.get(`/indexes/${name}/docs/${field}/${encodeURIComponent(value)}`)
+  return data
 }
 
-export async function compressIndex(name) {
-  await api.post(`/indexes/${name}/compress`)
+export async function deleteDoc(name, field, value) {
+  const { data } = await api.delete(`/indexes/${name}/docs/${field}/${encodeURIComponent(value)}`)
+  return data
+}
+
+// Search
+export async function searchIndex(name, q, limit = 10, offset = 0, highlight = []) {
+  const { data } = await api.get(`/indexes/${name}/search`, {
+    params: { q, limit, offset, highlight }
+  })
+  return data
+}
+
+export async function searchIndexPost(name, body) {
+  const { data } = await api.post(`/indexes/${name}/search`, body)
+  return data
 }
