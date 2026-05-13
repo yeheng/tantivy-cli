@@ -2,15 +2,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tantivy::schema::FieldType;
-use tantivy::{Index, IndexBuilder, ReloadPolicy, TantivyDocument};
+use tantivy::{Index, IndexBuilder};
 
 use crate::error::{AppError, Result};
 use crate::index::schema::SchemaDef;
 
-const WRITER_HEAP_BYTES: usize = 15_000_000;
-
-pub use crate::index::handle::{IndexHandle, IndexState, IndexStatus, WriterSlot};
+pub use crate::index::handle::{IndexHandle, IndexState};
 pub use crate::index::ops::validate_index_name;
 
 /// Manages multiple indexes dynamically.
@@ -25,6 +22,16 @@ impl IndexManager {
     pub fn new(base_dir: impl AsRef<Path>) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&base_dir)?;
+
+        // Clean up orphan trash directories from previous crashes.
+        if let Ok(entries) = std::fs::read_dir(&base_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(".deleting_") {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+
         Ok(Self {
             base_dir,
             indexes: Arc::new(DashMap::new()),
@@ -59,30 +66,7 @@ impl IndexManager {
                 .schema(schema.clone())
                 .create_in_dir(&index_dir)?;
 
-            let reader = index
-                .reader_builder()
-                .reload_policy(ReloadPolicy::OnCommitWithDelay)
-                .try_into()?;
-
-            let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let text_fields: Vec<_> = schema
-                .fields()
-                .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
-                .map(|(field, _)| field)
-                .collect();
-            let handle = Arc::new(IndexHandle {
-                name: name.clone(),
-                index,
-                schema: schema.clone(),
-                reader,
-                writer: Arc::new(std::sync::RwLock::new(WriterSlot {
-                    writer: Some(writer),
-                })),
-                dirty: std::sync::atomic::AtomicBool::new(false),
-                expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                status: std::sync::atomic::AtomicU8::new(IndexStatus::Idle as u8),
-                text_fields,
-            });
+            let handle = IndexHandle::build(name, index)?;
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
         })
@@ -127,31 +111,7 @@ impl IndexManager {
             }
 
             let index = Index::open_in_dir(&index_dir)?;
-            let schema = index.schema();
-            let reader = index
-                .reader_builder()
-                .reload_policy(ReloadPolicy::OnCommitWithDelay)
-                .try_into()?;
-
-            let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let text_fields: Vec<_> = schema
-                .fields()
-                .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
-                .map(|(field, _)| field)
-                .collect();
-            let handle = Arc::new(IndexHandle {
-                name: name.clone(),
-                index,
-                schema: schema.clone(),
-                reader,
-                writer: Arc::new(std::sync::RwLock::new(WriterSlot {
-                    writer: Some(writer),
-                })),
-                dirty: std::sync::atomic::AtomicBool::new(false),
-                expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                status: std::sync::atomic::AtomicU8::new(IndexStatus::Idle as u8),
-                text_fields,
-            });
+            let handle = IndexHandle::build(name, index)?;
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
         })
@@ -161,10 +121,7 @@ impl IndexManager {
         match self.indexes.insert(name_for_insert.clone(), IndexState::Active(handle.clone())) {
             None => Ok(handle),
             Some(IndexState::Active(existing)) => Ok(existing),
-            Some(IndexState::Deleting) => {
-                drop(handle);
-                Err(AppError::IndexNotFound(name_for_insert))
-            }
+            Some(IndexState::Deleting) => Err(AppError::IndexNotFound(name_for_insert)),
         }
     }
 
@@ -180,8 +137,6 @@ impl IndexManager {
             if let IndexState::Active(h) = old {
                 handle = Some(h);
             }
-        } else {
-            self.indexes.insert(name.to_string(), IndexState::Deleting);
         }
 
         let base_dir = self.base_dir.clone();
@@ -189,6 +144,9 @@ impl IndexManager {
         let name_for_remove = name.clone();
         let delete_result = tokio::task::spawn_blocking(move || {
             let index_dir = crate::index::ops::safe_index_path(&base_dir, &name)?;
+            if !index_dir.exists() {
+                return Ok(None);
+            }
 
             // Rename directory first so the original name is immediately reusable.
             let trash_dir = base_dir.join(format!(".deleting_{}_{}", name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
@@ -196,48 +154,50 @@ impl IndexManager {
             if let Some(handle) = handle {
                 // 1. Release writer lock first, BEFORE any filesystem operations.
                 let mut w = handle.writer.write().unwrap();
-                w.writer.take(); // drop IndexWriter, releasing file locks
+                w.take(); // drop IndexWriter, releasing file locks
                 drop(w);
 
                 // 2. Now safe to rename directory (writer no longer holds .tantivy-meta.lock).
-                if index_dir.exists() {
-                    std::fs::rename(&index_dir, &trash_dir)?;
-                }
+                std::fs::rename(&index_dir, &trash_dir)?;
 
-                // 3. Wait for other Arc references to drop.
-                let start = std::time::Instant::now();
-                while Arc::strong_count(&handle) > 1 {
-                    if start.elapsed() > std::time::Duration::from_secs(5) {
-                        tracing::warn!(index = %name, "timeout waiting for index references to drop; leaving trash directory");
-                        return Ok(());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-
-                // 4. CRITICAL: drop handle to release reader and its mmap mappings.
+                // 3. Drop handle to release reader and its mmap mappings.
                 drop(handle);
 
-                // 5. Now safe to physically delete directory.
-                if trash_dir.exists() {
-                    std::fs::remove_dir_all(&trash_dir)?;
-                }
+                // 4. Return trash path for background cleanup.
+                Ok(Some(trash_dir))
             } else {
-                // No active handle: just rename and delete.
-                if index_dir.exists() {
-                    std::fs::rename(&index_dir, &trash_dir)?;
-                }
-                if trash_dir.exists() {
-                    std::fs::remove_dir_all(&trash_dir)?;
-                }
+                // No active handle: just rename.
+                std::fs::rename(&index_dir, &trash_dir)?;
+                Ok(Some(trash_dir))
             }
-            Ok::<(), AppError>(())
         })
         .await;
 
         match delete_result {
-            Ok(Ok(())) => {
+            Ok(Ok(Some(trash_dir))) => {
+                // Spawn a detached task to clean up the trash directory.
+                tokio::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let start = std::time::Instant::now();
+                        while trash_dir.exists() {
+                            if start.elapsed() > std::time::Duration::from_secs(60) {
+                                tracing::warn!(path = %trash_dir.display(), "timeout removing trash directory");
+                                break;
+                            }
+                            if std::fs::remove_dir_all(&trash_dir).is_ok() {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }).await;
+                });
                 self.indexes.remove(&name_for_remove);
                 Ok(())
+            }
+            Ok(Ok(None)) => {
+                // Directory didn't exist and no handle — index was not found.
+                self.indexes.remove(&name_for_remove);
+                Err(AppError::IndexNotFound(name_for_remove))
             }
             Ok(Err(e)) => {
                 self.indexes.remove(&name_for_remove);
@@ -295,43 +255,13 @@ impl IndexManager {
                             continue;
                         }
                     };
-                    let schema = index.schema();
-                    let reader = match index
-                        .reader_builder()
-                        .reload_policy(ReloadPolicy::OnCommitWithDelay)
-                        .try_into()
-                    {
-                        Ok(r) => r,
+                    let handle = match IndexHandle::build(name.clone(), index) {
+                        Ok(h) => h,
                         Err(e) => {
-                            tracing::warn!(index = %name, error = %e, "failed to build reader");
+                            tracing::warn!(index = %name, error = %e, "failed to build index handle");
                             continue;
                         }
                     };
-                    let writer = match index.writer::<TantivyDocument>(WRITER_HEAP_BYTES) {
-                        Ok(w) => w,
-                        Err(e) => {
-                            tracing::warn!(index = %name, error = %e, "failed to create writer");
-                            continue;
-                        }
-                    };
-                    let text_fields: Vec<_> = schema
-                        .fields()
-                        .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
-                        .map(|(field, _)| field)
-                        .collect();
-                    let handle = Arc::new(IndexHandle {
-                        name: name.clone(),
-                        index,
-                        schema: schema.clone(),
-                        reader,
-                        writer: Arc::new(std::sync::RwLock::new(WriterSlot {
-                            writer: Some(writer),
-                        })),
-                        dirty: std::sync::atomic::AtomicBool::new(false),
-                        expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                        status: std::sync::atomic::AtomicU8::new(IndexStatus::Idle as u8),
-                        text_fields,
-                    });
                     handles.push((name, handle));
                 }
             }
@@ -360,6 +290,7 @@ mod tests {
 
     use tokio::task::JoinSet;
 
+    use crate::error::AppError;
     use crate::index::manager::IndexManager;
     use crate::index::ops::validate_index_name;
     use crate::index::schema::{FieldDef, FieldKind, SchemaDef};
@@ -460,6 +391,64 @@ mod tests {
         mgr_a.delete_index("shared").await.unwrap();
         assert!(mgr_a.open_index("shared").await.is_err());
         assert!(mgr_b.open_index("shared").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_returns_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = IndexManager::new(tmp.path()).unwrap();
+
+        let result = manager.delete_index("nonexistent").await;
+        assert!(
+            matches!(result, Err(AppError::IndexNotFound(_))),
+            "deleting a non-existent index should return IndexNotFound"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_startup_cleans_orphan_trash_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf();
+
+        // Manually create orphan trash directories before constructing IndexManager.
+        let orphan1 = base.join(".deleting_foo_123");
+        let orphan2 = base.join(".deleting_bar_456");
+        std::fs::create_dir_all(&orphan1).unwrap();
+        std::fs::create_dir_all(&orphan2).unwrap();
+
+        // Constructing IndexManager should clean them up.
+        let _manager = IndexManager::new(&base).unwrap();
+
+        assert!(!orphan1.exists(), "orphan trash dir 1 should be removed on startup");
+        assert!(!orphan2.exists(), "orphan trash dir 2 should be removed on startup");
+    }
+
+    #[tokio::test]
+    async fn test_delete_index_does_not_block_on_inflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = IndexManager::new(tmp.path()).unwrap();
+        let schema = test_schema();
+
+        manager.create_index("test", &schema).await.unwrap();
+
+        // Hold a cloned handle to simulate an in-flight operation reference.
+        let handle = manager.open_index("test").await.unwrap();
+        let _cloned = Arc::clone(&handle);
+
+        // Delete should return immediately (rename + background cleanup),
+        // not block waiting for strong_count to drop.
+        let start = std::time::Instant::now();
+        manager.delete_index("test").await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "delete_index should not block on in-flight references, took {:?}",
+            elapsed
+        );
+
+        // The name should be immediately reusable.
+        manager.create_index("test", &schema).await.unwrap();
     }
 
     #[tokio::test]

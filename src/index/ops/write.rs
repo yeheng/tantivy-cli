@@ -13,7 +13,6 @@ pub async fn add_document(handle: Arc<IndexHandle>, doc_json: &JsonValue) -> Res
     tokio::task::spawn_blocking(move || {
         let w = handle.writer.read().unwrap();
         let writer = w
-            .writer
             .as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
         writer.add_document(doc)?;
@@ -45,7 +44,6 @@ pub async fn add_documents(handle: Arc<IndexHandle>, docs_json: Vec<JsonValue>) 
 
         let w = handle.writer.read().unwrap();
         let writer = w
-            .writer
             .as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
         let mut count = 0usize;
@@ -78,7 +76,6 @@ pub async fn delete_documents(
     tokio::task::spawn_blocking(move || {
         let w = handle.writer.read().unwrap();
         let writer = w
-            .writer
             .as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
         writer.delete_term(term);
@@ -97,7 +94,6 @@ pub async fn commit_index(handle: Arc<IndexHandle>) -> Result<()> {
         let mut w = handle.writer.write().unwrap();
         if handle.dirty.load(Ordering::Acquire) {
             let writer = w
-                .writer
                 .as_mut()
                 .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
             writer.commit()?;

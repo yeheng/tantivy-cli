@@ -2,8 +2,10 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use tantivy::schema::{Field, FieldType, Schema};
-use tantivy::{Index, IndexReader, IndexWriter};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use std::sync::RwLock;
+
+const WRITER_HEAP_BYTES: usize = 15_000_000;
 
 pub fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
     schema.get_field("expired_at").ok().and_then(|field| {
@@ -33,11 +35,6 @@ impl IndexStatus {
     }
 }
 
-/// Manages the lifecycle of an IndexWriter slot.
-pub struct WriterSlot {
-    pub writer: Option<IndexWriter>,
-}
-
 /// Holds an opened index together with its shared writer lock and reader.
 pub struct IndexHandle {
     pub name: String,
@@ -45,7 +42,7 @@ pub struct IndexHandle {
     pub schema: Schema,
     pub reader: IndexReader,
     /// Shared writer slot.
-    pub writer: Arc<RwLock<WriterSlot>>,
+    pub writer: Arc<RwLock<Option<IndexWriter>>>,
     /// Whether the index has uncommitted writes.
     pub dirty: AtomicBool,
     /// If the schema contains an `expired_at` date field, document expiration is enabled.
@@ -54,6 +51,33 @@ pub struct IndexHandle {
     pub status: AtomicU8,
     /// Pre-computed list of text fields for QueryString searches.
     pub text_fields: Vec<Field>,
+}
+
+impl IndexHandle {
+    pub fn build(name: String, index: Index) -> crate::error::Result<Arc<Self>> {
+        let schema = index.schema();
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
+        let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
+        let text_fields: Vec<_> = schema
+            .fields()
+            .filter(|(_, entry)| matches!(entry.field_type(), FieldType::Str(_)))
+            .map(|(field, _)| field)
+            .collect();
+        Ok(Arc::new(IndexHandle {
+            name: name.clone(),
+            expired_at_field: resolve_expired_at_field(&schema),
+            schema,
+            index,
+            reader,
+            writer: Arc::new(RwLock::new(Some(writer))),
+            dirty: AtomicBool::new(false),
+            status: AtomicU8::new(IndexStatus::Idle as u8),
+            text_fields,
+        }))
+    }
 }
 
 impl std::fmt::Debug for IndexHandle {

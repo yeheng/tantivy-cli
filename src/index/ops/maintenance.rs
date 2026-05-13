@@ -11,7 +11,7 @@ use tantivy::{
 use crate::error::{AppError, Result};
 use crate::index::handle::IndexStatus;
 use crate::index::manager::IndexHandle;
-use crate::index::ops::commit_index;
+
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IndexStats {
@@ -84,7 +84,6 @@ pub async fn rebuild_index(handle: Arc<IndexHandle>) -> Result<()> {
             let mut w = handle.writer.write().unwrap();
             if handle.dirty.load(Ordering::Acquire) {
                 let writer = w
-                    .writer
                     .as_mut()
                     .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
                 writer.commit()?;
@@ -103,7 +102,6 @@ pub async fn rebuild_index(handle: Arc<IndexHandle>) -> Result<()> {
         let merge_result = {
             let mut w = handle.writer.write().unwrap();
             let writer = w
-                .writer
                 .as_mut()
                 .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
 
@@ -122,7 +120,6 @@ pub async fn rebuild_index(handle: Arc<IndexHandle>) -> Result<()> {
         // Commit to make the merge durable.
         let mut w = handle.writer.write().unwrap();
         let writer = w
-            .writer
             .as_mut()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
         writer.commit()?;
@@ -137,13 +134,7 @@ pub async fn rebuild_index(handle: Arc<IndexHandle>) -> Result<()> {
 /// Commit and wait for merge to complete, then commit again.
 /// This is a real "compress" operation — not just a commit alias.
 pub async fn compress_index(handle: Arc<IndexHandle>) -> Result<()> {
-    // Commit first to flush any pending writes.
-    commit_index(Arc::clone(&handle)).await?;
-
-    // Then merge all segments into one and commit again.
-    rebuild_index(handle).await?;
-
-    Ok(())
+    rebuild_index(handle).await
 }
 
 /// Delete documents whose `expired_at` timestamp is earlier than now.
@@ -160,8 +151,7 @@ pub async fn cleanup_expired(handle: Arc<IndexHandle>) -> Result<()> {
     let handle = Arc::clone(&handle);
     tokio::task::spawn_blocking(move || {
         let w = handle.writer.read().unwrap();
-        w.writer
-            .as_ref()
+        w.as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
             .delete_query(Box::new(RangeQuery::new(Bound::Unbounded, upper)))?;
         handle.dirty.store(true, Ordering::Release);
