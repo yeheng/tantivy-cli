@@ -9,7 +9,7 @@ use crate::index::schema::SchemaDef;
 
 const WRITER_HEAP_BYTES: usize = 15_000_000;
 
-pub use crate::index::handle::{IndexHandle, IndexState, IndexStatus, ManagedWriter};
+pub use crate::index::handle::{IndexHandle, IndexState, IndexStatus, WriterSlot};
 pub use crate::index::ops::validate_index_name;
 
 /// Manages multiple indexes dynamically.
@@ -64,19 +64,17 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let managed = Arc::new(std::sync::RwLock::new(ManagedWriter {
-                writer: Some(writer),
-                dirty: std::sync::atomic::AtomicBool::new(false),
-            }));
-
             let handle = Arc::new(IndexHandle {
                 name: name.clone(),
                 index,
                 schema: schema.clone(),
                 reader,
-                writer: managed,
+                writer: Arc::new(std::sync::RwLock::new(WriterSlot {
+                    writer: Some(writer),
+                })),
+                dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                status: Arc::new(std::sync::RwLock::new(IndexStatus::Idle)),
+                status: Arc::new(std::sync::atomic::AtomicU8::new(IndexStatus::IDLE_U8)),
             });
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
@@ -129,19 +127,17 @@ impl IndexManager {
                 .try_into()?;
 
             let writer = index.writer::<TantivyDocument>(WRITER_HEAP_BYTES)?;
-            let managed = Arc::new(std::sync::RwLock::new(ManagedWriter {
-                writer: Some(writer),
-                dirty: std::sync::atomic::AtomicBool::new(false),
-            }));
-
             let handle = Arc::new(IndexHandle {
                 name: name.clone(),
                 index,
                 schema: schema.clone(),
                 reader,
-                writer: managed,
+                writer: Arc::new(std::sync::RwLock::new(WriterSlot {
+                    writer: Some(writer),
+                })),
+                dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                status: Arc::new(std::sync::RwLock::new(IndexStatus::Idle)),
+                status: Arc::new(std::sync::atomic::AtomicU8::new(IndexStatus::IDLE_U8)),
             });
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
@@ -180,10 +176,19 @@ impl IndexManager {
         let name_for_remove = name.clone();
         let delete_result = tokio::task::spawn_blocking(move || {
             if let Some(handle) = handle {
-                let mut managed = handle.writer.write().unwrap();
-                managed.writer.take(); // drop IndexWriter, releasing file locks
-                drop(managed);
-                drop(handle);
+                let mut w = handle.writer.write().unwrap();
+                w.writer.take(); // drop IndexWriter, releasing file locks
+                drop(w);
+
+                // Wait for other Arc references to drop before deleting directory.
+                let start = std::time::Instant::now();
+                while Arc::strong_count(&handle) > 1 {
+                    if start.elapsed() > std::time::Duration::from_secs(5) {
+                        tracing::warn!(index = %name, "timeout waiting for index references to drop");
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
 
             let index_dir = crate::index::ops::safe_index_path(&base_dir, &name)?;
@@ -274,18 +279,17 @@ impl IndexManager {
                             continue;
                         }
                     };
-                    let managed = Arc::new(std::sync::RwLock::new(ManagedWriter {
-                        writer: Some(writer),
-                        dirty: std::sync::atomic::AtomicBool::new(false),
-                    }));
                     let handle = Arc::new(IndexHandle {
                         name: name.clone(),
                         index,
                         schema: schema.clone(),
                         reader,
-                        writer: managed,
+                        writer: Arc::new(std::sync::RwLock::new(WriterSlot {
+                            writer: Some(writer),
+                        })),
+                        dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         expired_at_field: crate::index::handle::resolve_expired_at_field(&schema),
-                        status: Arc::new(std::sync::RwLock::new(IndexStatus::Idle)),
+                        status: Arc::new(std::sync::atomic::AtomicU8::new(IndexStatus::IDLE_U8)),
                     });
                     handles.push((name, handle));
                 }

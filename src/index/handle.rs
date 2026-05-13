@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use tantivy::schema::{Field, FieldType, Schema};
@@ -17,23 +17,20 @@ pub fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum IndexStatus {
     Idle,
     Rebuilding,
 }
 
-pub struct ManagedWriter {
-    pub writer: Option<IndexWriter>,
-    pub dirty: AtomicBool,
+impl IndexStatus {
+    pub const IDLE_U8: u8 = 0;
+    pub const REBUILDING_U8: u8 = 1;
 }
 
-impl std::fmt::Debug for ManagedWriter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ManagedWriter")
-            .field("has_writer", &self.writer.is_some())
-            .field("dirty", &self.dirty.load(Ordering::Relaxed))
-            .finish()
-    }
+/// Manages the lifecycle of an IndexWriter slot.
+pub struct WriterSlot {
+    pub writer: Option<IndexWriter>,
 }
 
 /// Holds an opened index together with its shared writer lock and reader.
@@ -42,12 +39,14 @@ pub struct IndexHandle {
     pub index: Index,
     pub schema: Schema,
     pub reader: IndexReader,
-    /// Shared RwLock-protected writer.
-    pub writer: Arc<RwLock<ManagedWriter>>,
+    /// Shared writer slot.
+    pub writer: Arc<RwLock<WriterSlot>>,
+    /// Whether the index has uncommitted writes.
+    pub dirty: Arc<AtomicBool>,
     /// If the schema contains an `expired_at` date field, document expiration is enabled.
     pub expired_at_field: Option<Field>,
-    /// Current lifecycle status of the index (e.g., Idle, Rebuilding).
-    pub status: Arc<RwLock<IndexStatus>>,
+    /// Current lifecycle status of the index (0 = Idle, 1 = Rebuilding).
+    pub status: Arc<AtomicU8>,
 }
 
 impl std::fmt::Debug for IndexHandle {
@@ -56,6 +55,8 @@ impl std::fmt::Debug for IndexHandle {
             .field("name", &self.name)
             .field("schema", &self.schema)
             .field("expired_at_field", &self.expired_at_field)
+            .field("dirty", &self.dirty.load(Ordering::Relaxed))
+            .field("status", &self.status.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }

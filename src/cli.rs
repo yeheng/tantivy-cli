@@ -125,7 +125,7 @@ pub async fn run_cli(cli: Cli, manager: &IndexManager) -> Result<()> {
             value,
         } => {
             let handle = manager.open_index(&index).await?;
-            let doc = ops::get_document(&handle, Some(&field), &value).await?;
+            let doc = ops::get_document(&handle, &field, &value).await?;
             println!("{}", serde_json::to_string_pretty(&doc)?);
         }
         Commands::DeleteDoc {

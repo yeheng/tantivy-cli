@@ -18,7 +18,7 @@ fn run_search<C, R>(
     req: &EsSearchRequest,
     snippet_gens: &[(String, tantivy::snippet::SnippetGenerator)],
     top_collector: C,
-    aggs: Option<&tantivy::aggregation::agg_req::Aggregations>,
+    aggs: Option<tantivy::aggregation::agg_req::Aggregations>,
 ) -> Result<(
     usize,
     Vec<crate::search::model::SearchHit>,
@@ -28,31 +28,23 @@ where
     C: tantivy::collector::Collector<Fruit = Vec<R>>,
     R: TopDocsResult + Send + 'static,
 {
-    if let Some(aggs) = aggs {
-        let mut collectors = MultiCollector::new();
-        let top_handle = collectors.add_collector(top_collector);
-        let count_handle = collectors.add_collector(Count);
-        let agg_handle = collectors.add_collector(AggregationCollector::from_aggs(
-            aggs.clone(),
+    let mut collectors = MultiCollector::new();
+    let top_handle = collectors.add_collector(top_collector);
+    let count_handle = collectors.add_collector(Count);
+    let agg_handle = aggs.map(|a| {
+        collectors.add_collector(AggregationCollector::from_aggs(
+            a,
             AggContextParams::default(),
-        ));
-        let mut multi_fruit = searcher.search(query, &collectors)?;
-        let total = count_handle.extract(&mut multi_fruit);
-        let top_docs = top_handle.extract(&mut multi_fruit);
-        let agg_results = agg_handle.extract(&mut multi_fruit);
-        let hits = process_top_docs(handle, searcher, req, snippet_gens, top_docs)?;
-        let agg_json = serde_json::to_value(agg_results)?;
-        Ok((total, hits, Some(agg_json)))
-    } else {
-        let mut collectors = MultiCollector::new();
-        let top_handle = collectors.add_collector(top_collector);
-        let count_handle = collectors.add_collector(Count);
-        let mut multi_fruit = searcher.search(query, &collectors)?;
-        let total = count_handle.extract(&mut multi_fruit);
-        let top_docs = top_handle.extract(&mut multi_fruit);
-        let hits = process_top_docs(handle, searcher, req, snippet_gens, top_docs)?;
-        Ok((total, hits, None))
-    }
+        ))
+    });
+    let mut multi_fruit = searcher.search(query, &collectors)?;
+    let total = count_handle.extract(&mut multi_fruit);
+    let top_docs = top_handle.extract(&mut multi_fruit);
+    let hits = process_top_docs(handle, searcher, req, snippet_gens, top_docs)?;
+    let agg_json = agg_handle.and_then(|h| {
+        serde_json::to_value(h.extract(&mut multi_fruit)).ok()
+    });
+    Ok((total, hits, agg_json))
 }
 
 /// Internal synchronous search logic, extracted so it can be run inside spawn_blocking.
@@ -70,7 +62,7 @@ fn do_search(handle: &IndexHandle, req: &EsSearchRequest) -> Result<SearchRespon
             req,
             &snippet_gens,
             collector,
-            req.aggs.as_ref(),
+            req.aggs.clone(),
         )?
     } else {
         if req.sort.len() > 1 {
@@ -92,7 +84,7 @@ fn do_search(handle: &IndexHandle, req: &EsSearchRequest) -> Result<SearchRespon
                 req,
                 &snippet_gens,
                 collector,
-                req.aggs.as_ref(),
+                req.aggs.clone(),
             )?
         } else {
             let field = handle
@@ -107,41 +99,58 @@ fn do_search(handle: &IndexHandle, req: &EsSearchRequest) -> Result<SearchRespon
                 )));
             }
             let order: Order = (*order).into();
-            macro_rules! execute_sort {
-                ($collector:expr) => {{
-                    run_search(
-                        handle,
-                        &searcher,
-                        &*query,
-                        req,
-                        &snippet_gens,
-                        $collector,
-                        req.aggs.as_ref(),
-                    )?
-                }};
-            }
 
             match entry.field_type() {
-                FieldType::U64(_) => execute_sort!(
+                FieldType::U64(_) => run_search(
+                    handle,
+                    &searcher,
+                    &*query,
+                    req,
+                    &snippet_gens,
                     TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<u64>(field_name, order)
-                ),
-                FieldType::I64(_) => execute_sort!(
+                        .order_by_fast_field::<u64>(field_name, order),
+                    req.aggs.clone(),
+                )?,
+                FieldType::I64(_) => run_search(
+                    handle,
+                    &searcher,
+                    &*query,
+                    req,
+                    &snippet_gens,
                     TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<i64>(field_name, order)
-                ),
-                FieldType::F64(_) => execute_sort!(
+                        .order_by_fast_field::<i64>(field_name, order),
+                    req.aggs.clone(),
+                )?,
+                FieldType::F64(_) => run_search(
+                    handle,
+                    &searcher,
+                    &*query,
+                    req,
+                    &snippet_gens,
                     TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<f64>(field_name, order)
-                ),
-                FieldType::Date(_) => execute_sort!(
+                        .order_by_fast_field::<f64>(field_name, order),
+                    req.aggs.clone(),
+                )?,
+                FieldType::Date(_) => run_search(
+                    handle,
+                    &searcher,
+                    &*query,
+                    req,
+                    &snippet_gens,
                     TopDocs::with_limit(req.size + req.from)
-                        .order_by_fast_field::<tantivy::DateTime>(field_name, order)
-                ),
-                FieldType::Str(_) => execute_sort!(
+                        .order_by_fast_field::<tantivy::DateTime>(field_name, order),
+                    req.aggs.clone(),
+                )?,
+                FieldType::Str(_) => run_search(
+                    handle,
+                    &searcher,
+                    &*query,
+                    req,
+                    &snippet_gens,
                     TopDocs::with_limit(req.size + req.from)
-                        .order_by_string_fast_field(field_name, order)
-                ),
+                        .order_by_string_fast_field(field_name, order),
+                    req.aggs.clone(),
+                )?,
                 _ => {
                     return Err(AppError::BadRequest(format!(
                         "unsupported sort field type for '{}'",

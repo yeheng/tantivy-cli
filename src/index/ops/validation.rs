@@ -19,14 +19,8 @@ pub fn validate_index_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build the absolute path for an index directory and verify it stays within base_dir.
+/// Build the absolute path for an index directory.
+/// `name` MUST have been validated by `validate_index_name` before calling this.
 pub fn safe_index_path(base_dir: &Path, name: &str) -> Result<PathBuf> {
-    validate_index_name(name)?;
-    let path = base_dir.join(name);
-    let canonical_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.to_path_buf());
-    let resolved = canonical_base.join(name);
-    if !resolved.starts_with(&canonical_base) {
-        return Err(AppError::BadRequest("invalid index name".to_string()));
-    }
-    Ok(path)
+    Ok(base_dir.join(name))
 }

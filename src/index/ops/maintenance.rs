@@ -1,5 +1,6 @@
 use std::ops::Bound;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tantivy::{
@@ -8,7 +9,8 @@ use tantivy::{
 };
 
 use crate::error::{AppError, Result};
-use crate::index::manager::{IndexHandle, IndexStatus};
+use crate::index::handle::IndexStatus;
+use crate::index::manager::IndexHandle;
 use crate::index::ops::commit_index;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,26 +38,23 @@ pub async fn index_stats(handle: &IndexHandle) -> Result<IndexStats> {
     .map_err(|e| AppError::Internal(format!("spawn_blocking failed: {e}")))?
 }
 
-struct RebuildGuard(std::sync::Arc<std::sync::RwLock<IndexStatus>>);
+struct RebuildGuard(Arc<std::sync::atomic::AtomicU8>);
 
 impl Drop for RebuildGuard {
     fn drop(&mut self) {
-        if let Ok(mut status) = self.0.write() {
-            *status = IndexStatus::Idle;
-        }
+        self.0.store(IndexStatus::IDLE_U8, Ordering::Release);
     }
 }
 
 /// Fire-and-forget rebuild: sets the index status to Rebuilding and spawns
 /// a background task that runs the actual merge. The status is reset to Idle
 /// via an RAII guard when the task completes or panics.
-pub fn trigger_rebuild(handle: std::sync::Arc<IndexHandle>) -> Result<()> {
-    let mut status = handle.status.write().unwrap();
-    if *status == IndexStatus::Rebuilding {
+pub fn trigger_rebuild(handle: Arc<IndexHandle>) -> Result<()> {
+    let status = handle.status.load(Ordering::Acquire);
+    if status == IndexStatus::REBUILDING_U8 {
         return Err(AppError::Conflict("Index is already rebuilding".to_string()));
     }
-    *status = IndexStatus::Rebuilding;
-    drop(status);
+    handle.status.store(IndexStatus::REBUILDING_U8, Ordering::Release);
 
     tokio::spawn(async move {
         let _guard = RebuildGuard(handle.status.clone());
@@ -74,14 +73,17 @@ pub async fn rebuild_index(handle: &IndexHandle) -> Result<()> {
     // Phase 1: commit under lock (fast).
     {
         let writer = handle.writer.clone();
+        let dirty = handle.dirty.clone();
         tokio::task::spawn_blocking(move || {
-            let mut managed = writer.write().unwrap();
-            managed
-                .writer
-                .as_mut()
-                .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
-                .commit()?;
-            managed.dirty.store(false, Ordering::Release);
+            let mut w = writer.write().unwrap();
+            if dirty.load(Ordering::Acquire) {
+                let writer = w
+                    .writer
+                    .as_mut()
+                    .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+                writer.commit()?;
+                dirty.store(false, Ordering::Release);
+            }
             Ok::<(), AppError>(())
         })
         .await
@@ -104,14 +106,22 @@ pub async fn rebuild_index(handle: &IndexHandle) -> Result<()> {
     let writer = handle.writer.clone();
     tokio::task::spawn_blocking(move || {
         let merge_result = {
-            let mut managed = writer.write().unwrap();
-            let w = managed
+            let mut w = writer.write().unwrap();
+            let writer = w
                 .writer
                 .as_mut()
                 .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
-            w.merge(&segment_ids)
+            writer.merge(&segment_ids)
         }; // Lock is dropped here!
         merge_result.wait().map_err(|e| AppError::Internal(e.to_string()))?;
+
+        // Commit to make the merge durable.
+        let mut w = writer.write().unwrap();
+        let writer = w
+            .writer
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?;
+        writer.commit()?;
         Ok::<(), AppError>(())
     })
     .await
@@ -129,7 +139,6 @@ pub async fn compress_index(handle: &IndexHandle) -> Result<()> {
     // Then merge all segments into one and commit again.
     rebuild_index(handle).await?;
 
-    commit_index(handle).await?;
     Ok(())
 }
 
@@ -146,6 +155,7 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
 
     let writer = handle.writer.clone();
     let reader = handle.reader.clone();
+    let dirty = handle.dirty.clone();
     let index_name = handle.name.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -158,13 +168,12 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
             return Ok(());
         }
 
-        let managed = writer.read().unwrap();
-        managed
-            .writer
+        let w = writer.read().unwrap();
+        w.writer
             .as_ref()
             .ok_or_else(|| AppError::Internal("writer unavailable".to_string()))?
             .delete_query(Box::new(RangeQuery::new(Bound::Unbounded, upper)))?;
-        managed.dirty.store(true, Ordering::Release);
+        dirty.store(true, Ordering::Release);
         tracing::info!(index = %index_name, "cleaned up expired documents");
         Ok::<(), AppError>(())
     })
@@ -173,4 +182,3 @@ pub async fn cleanup_expired(handle: &IndexHandle) -> Result<()> {
 
     Ok(())
 }
-

@@ -58,7 +58,7 @@ pub async fn get_doc(
     Path((name, field, value)): Path<(String, String, String)>,
 ) -> Result<Json<JsonValue>> {
     let handle = state.manager.open_index(&name).await?;
-    let doc = ops::get_document(&handle, Some(&field), &value).await?;
+    let doc = ops::get_document(&handle, &field, &value).await?;
     Ok(Json(doc))
 }
 

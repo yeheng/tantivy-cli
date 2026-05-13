@@ -1,6 +1,6 @@
 use serde_json::Value as JsonValue;
 use tantivy::TantivyDocument;
-use tantivy::schema::OwnedValue;
+use tantivy::schema::{Field, FieldType, OwnedValue, Term};
 
 use crate::error::{AppError, Result};
 
@@ -131,6 +131,80 @@ fn json_to_owned_value(value: &JsonValue) -> Result<OwnedValue> {
             }
             Ok(OwnedValue::Object(obj))
         }
+    }
+}
+
+/// Build a Tantivy Term from a string value based on the field type.
+pub fn str_to_term(field: Field, field_type: &FieldType, value: &str) -> Result<Term> {
+    match field_type {
+        FieldType::Str(_) => Ok(Term::from_field_text(field, value)),
+        FieldType::U64(_) => Ok(Term::from_field_u64(field, value.parse()?)),
+        FieldType::I64(_) => Ok(Term::from_field_i64(field, value.parse()?)),
+        FieldType::F64(_) => Ok(Term::from_field_f64(field, value.parse()?)),
+        FieldType::Bool(_) => Ok(Term::from_field_bool(field, value.parse()?)),
+        FieldType::Date(_) => {
+            let dt = value
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|e| AppError::Schema(format!("invalid date: {e}")))?;
+            Ok(Term::from_field_date_for_search(
+                field,
+                tantivy::DateTime::from_timestamp_micros(dt.timestamp_micros()),
+            ))
+        }
+        _ => Err(AppError::Schema("unsupported field type".to_string())),
+    }
+}
+
+/// Build a Tantivy Term from a JSON value based on the field type.
+pub fn json_value_to_term(
+    field: Field,
+    value: &JsonValue,
+    field_type: &FieldType,
+) -> Result<Term> {
+    match field_type {
+        FieldType::Str(_) => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::Schema("expected string".to_string()))?;
+            Ok(Term::from_field_text(field, s))
+        }
+        FieldType::U64(_) => {
+            let v = value
+                .as_u64()
+                .ok_or_else(|| AppError::Schema("expected u64".to_string()))?;
+            Ok(Term::from_field_u64(field, v))
+        }
+        FieldType::I64(_) => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::Schema("expected i64".to_string()))?;
+            Ok(Term::from_field_i64(field, v))
+        }
+        FieldType::F64(_) => {
+            let v = value
+                .as_f64()
+                .ok_or_else(|| AppError::Schema("expected f64".to_string()))?;
+            Ok(Term::from_field_f64(field, v))
+        }
+        FieldType::Bool(_) => {
+            let v = value
+                .as_bool()
+                .ok_or_else(|| AppError::Schema("expected bool".to_string()))?;
+            Ok(Term::from_field_bool(field, v))
+        }
+        FieldType::Date(_) => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::Schema("expected date string".to_string()))?;
+            let dt = s
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|e| AppError::Schema(format!("invalid date: {e}")))?;
+            Ok(Term::from_field_date_for_search(
+                field,
+                tantivy::DateTime::from_timestamp_micros(dt.timestamp_micros()),
+            ))
+        }
+        _ => Err(AppError::Schema("unsupported filter field type".to_string())),
     }
 }
 
