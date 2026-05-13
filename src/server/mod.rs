@@ -11,6 +11,7 @@ mod docs;
 mod index;
 mod maintenance;
 mod search;
+mod ui;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -84,6 +85,7 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
     let state = AppState { manager };
 
     let app = Router::new()
+        .route("/", axum::routing::get(ui::index))
         .route("/indexes", axum::routing::get(index::list_indexes))
         .route(
             "/indexes/{name}",
@@ -119,6 +121,7 @@ pub async fn serve(manager: IndexManager, bind: &str) -> Result<()> {
             "/indexes/{name}/compress",
             axum::routing::post(maintenance::compress_index),
         )
+        .route("/{*path}", axum::routing::get(ui::static_file))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

@@ -16,11 +16,16 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+rust-embed = "8"
+mime_guess = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 dashmap = "6"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+tokio = { version = "1", features = ["process", "rt-multi-thread"] }
 
 [dev-dependencies]
 tempfile = "3"
