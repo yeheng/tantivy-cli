@@ -234,6 +234,17 @@ impl IndexManager {
 
     pub async fn load_all_indexes(&self) -> Result<Vec<String>> {
         let base_dir = self.base_dir.clone();
+        // Collect names already loaded so we don't try to re-open them
+        // and hit LockBusy on the writer lock.
+        let existing: Vec<String> = self
+            .indexes
+            .iter()
+            .filter_map(|e| match e.value() {
+                IndexState::Active(_) => Some(e.key().clone()),
+                IndexState::Deleting => None,
+            })
+            .collect();
+
         let handles = tokio::task::spawn_blocking(move || {
             let mut handles = Vec::new();
             for entry in std::fs::read_dir(&base_dir)? {
@@ -246,6 +257,9 @@ impl IndexManager {
                     };
                     if validate_index_name(&name).is_err() {
                         tracing::warn!(name = %name, "skipping index with invalid name");
+                        continue;
+                    }
+                    if existing.contains(&name) {
                         continue;
                     }
                     let index = match Index::open_in_dir(&path) {
