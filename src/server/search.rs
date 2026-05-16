@@ -29,6 +29,26 @@ fn default_snippet() -> usize {
     150
 }
 
+fn make_prefix_query(q: &str) -> String {
+    let trimmed = q.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    // If the query already contains query syntax characters, leave it as-is
+    if trimmed.contains('*')
+        || trimmed.contains('"')
+        || trimmed.contains('(')
+        || trimmed.contains(':')
+        || trimmed.contains(' ')
+        || trimmed.contains('+')
+        || trimmed.contains('-')
+    {
+        return trimmed.to_string();
+    }
+    // Simple single-word query: turn it into a prefix search
+    format!("{}*", trimmed)
+}
+
 pub async fn search(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -38,7 +58,9 @@ pub async fn search(
     let req = EsSearchRequest {
         from: q.offset,
         size: q.limit,
-        query: Some(EsQuery::QueryString { query: q.q }),
+        query: Some(EsQuery::QueryString {
+            query: make_prefix_query(&q.q),
+        }),
         sort: Vec::new(),
         aggs: None,
         highlight_fields: q.highlight,

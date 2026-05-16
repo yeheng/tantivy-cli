@@ -24,12 +24,12 @@ pub struct IndexStats {
 
 pub async fn index_stats(handle: Arc<IndexHandle>) -> Result<IndexStats> {
     let reader = handle.reader.clone();
-    let schema = handle.schema.clone();
+    let schema_def = handle.schema_def.clone();
     tokio::task::spawn_blocking(move || {
         let searcher = reader.searcher();
         let num_docs = searcher.num_docs();
         let num_segments = searcher.segment_readers().len();
-        let schema_json = serde_json::to_value(&schema)?;
+        let schema_json = serde_json::to_value(&schema_def)?;
         Ok(IndexStats {
             num_docs,
             num_segments,

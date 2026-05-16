@@ -543,3 +543,4 @@ tantivy-cli --index-dir /var/lib/tantivy <command>
 - [Tokio](https://tokio.rs/) — Async runtime
 - [Axum](https://github.com/tokio-rs/axum) — HTTP web framework
 - [Clap](https://github.com/clap-rs/clap) — CLI parser
+- [Flowbite](./llms.txt) - Flowbite UI

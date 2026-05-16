@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { Dialog, DialogPanel, DialogTitle, TransitionChild, TransitionRoot } from '@headlessui/vue'
+import { FwbModal } from 'flowbite-vue'
 import { PlusIcon, ArrowPathIcon, PauseIcon, PlayIcon, DocumentTextIcon, PuzzlePieceIcon, CubeIcon, CheckCircleIcon } from '@heroicons/vue/24/outline'
 import StatCard from '../components/StatCard.vue'
 import IndexTable from '../components/IndexTable.vue'
@@ -130,44 +130,42 @@ async function onConfirmDelete() {
     </div>
 
     <!-- Create dialog -->
-    <TransitionRoot appear :show="showCreate" as="template">
-      <Dialog as="div" @close="showCreate = false" class="relative z-50">
-        <TransitionChild enter="duration-200 ease-out" enter-from="opacity-0" enter-to="opacity-100"
-                         leave="duration-150 ease-in" leave-from="opacity-100" leave-to="opacity-0">
-          <div class="fixed inset-0 bg-black/30" />
-        </TransitionChild>
-        <div class="fixed inset-0 flex items-center justify-center p-4">
-          <TransitionChild enter="duration-200 ease-out" enter-from="opacity-0 scale-95" enter-to="opacity-100 scale-100"
-                           leave="duration-150 ease-in" leave-from="opacity-100 scale-100" leave-to="opacity-0 scale-95">
-            <DialogPanel class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6">
-              <DialogTitle class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Create Index</DialogTitle>
-              <div class="space-y-4">
-                <div>
-                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Name</label>
-                  <input v-model="newName"
-                    class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sky-500"
-                    placeholder="articles" />
-                </div>
-                <div>
-                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Schema JSON</label>
-                  <textarea v-model="newSchema" rows="8"
-                    class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-xs font-mono bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sky-500" />
-                </div>
-                <p v-if="createError" class="text-sm text-red-600 dark:text-red-400">{{ createError }}</p>
-                <div class="flex justify-end gap-2 pt-2">
-                  <button @click="showCreate = false"
-                    class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Cancel</button>
-                  <button @click="onCreate" :disabled="createLoading"
-                    class="px-4 py-2 text-sm font-medium text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50 rounded-lg transition-colors">
-                    {{ createLoading ? 'Creating...' : 'Create' }}
-                  </button>
-                </div>
-              </div>
-            </DialogPanel>
-          </TransitionChild>
+    <FwbModal
+      v-if="showCreate"
+      size="2xl"
+      @close="showCreate = false"
+      @click:outside="showCreate = false"
+    >
+      <template #header>
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Create Index</h3>
+      </template>
+      <template #body>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Name</label>
+            <input v-model="newName"
+              class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              placeholder="articles" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Schema JSON</label>
+            <textarea v-model="newSchema" rows="8"
+              class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-xs font-mono bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sky-500" />
+          </div>
+          <p v-if="createError" class="text-sm text-red-600 dark:text-red-400">{{ createError }}</p>
         </div>
-      </Dialog>
-    </TransitionRoot>
+      </template>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <button @click="showCreate = false"
+            class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Cancel</button>
+          <button @click="onCreate" :disabled="createLoading"
+            class="px-4 py-2 text-sm font-medium text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50 rounded-lg transition-colors">
+            {{ createLoading ? 'Creating...' : 'Create' }}
+          </button>
+        </div>
+      </template>
+    </FwbModal>
 
     <!-- Delete dialog -->
     <ConfirmDialog

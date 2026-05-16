@@ -10,6 +10,22 @@ use crate::index::schema::SchemaDef;
 pub use crate::index::handle::{IndexHandle, IndexState};
 pub use crate::index::ops::validate_index_name;
 
+const SCHEMA_DEF_FILE: &str = "schema.json";
+
+fn save_schema_def(index_dir: &std::path::Path, schema_def: &SchemaDef) -> Result<()> {
+    let path = index_dir.join(SCHEMA_DEF_FILE);
+    let json = serde_json::to_string_pretty(schema_def)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+fn load_schema_def(index_dir: &std::path::Path) -> Result<SchemaDef> {
+    let path = index_dir.join(SCHEMA_DEF_FILE);
+    let json = std::fs::read_to_string(&path)?;
+    let schema_def: SchemaDef = serde_json::from_str(&json)?;
+    Ok(schema_def)
+}
+
 /// Manages multiple indexes dynamically.
 #[derive(Clone)]
 pub struct IndexManager {
@@ -66,7 +82,9 @@ impl IndexManager {
                 .schema(schema.clone())
                 .create_in_dir(&index_dir)?;
 
-            let handle = IndexHandle::build(name, index)?;
+            save_schema_def(&index_dir, &schema_def)?;
+
+            let handle = IndexHandle::build(name, index, schema_def)?;
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
         })
@@ -111,7 +129,10 @@ impl IndexManager {
             }
 
             let index = Index::open_in_dir(&index_dir)?;
-            let handle = IndexHandle::build(name, index)?;
+            // Load schema definition from a sidecar JSON file if available,
+            // otherwise fall back to an empty schema definition.
+            let schema_def = load_schema_def(&index_dir).unwrap_or_else(|_| SchemaDef { fields: vec![] });
+            let handle = IndexHandle::build(name, index, schema_def)?;
 
             Ok::<Arc<IndexHandle>, AppError>(handle)
         })
@@ -269,7 +290,8 @@ impl IndexManager {
                             continue;
                         }
                     };
-                    let handle = match IndexHandle::build(name.clone(), index) {
+                    let schema_def = load_schema_def(&path).unwrap_or_else(|_| SchemaDef { fields: vec![] });
+                    let handle = match IndexHandle::build(name.clone(), index, schema_def) {
                         Ok(h) => h,
                         Err(e) => {
                             tracing::warn!(index = %name, error = %e, "failed to build index handle");

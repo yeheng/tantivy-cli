@@ -5,6 +5,8 @@ use tantivy::schema::{Field, FieldType, Schema};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use std::sync::RwLock;
 
+use crate::index::schema::SchemaDef;
+
 const WRITER_HEAP_BYTES: usize = 15_000_000;
 
 pub fn resolve_expired_at_field(schema: &Schema) -> Option<Field> {
@@ -40,6 +42,7 @@ pub struct IndexHandle {
     pub name: String,
     pub index: Index,
     pub schema: Schema,
+    pub schema_def: SchemaDef,
     pub reader: IndexReader,
     /// Shared writer slot.
     pub writer: Arc<RwLock<Option<IndexWriter>>>,
@@ -54,7 +57,7 @@ pub struct IndexHandle {
 }
 
 impl IndexHandle {
-    pub fn build(name: String, index: Index) -> crate::error::Result<Arc<Self>> {
+    pub fn build(name: String, index: Index, schema_def: SchemaDef) -> crate::error::Result<Arc<Self>> {
         let schema = index.schema();
         let reader = index
             .reader_builder()
@@ -70,6 +73,7 @@ impl IndexHandle {
             name: name.clone(),
             expired_at_field: resolve_expired_at_field(&schema),
             schema,
+            schema_def,
             index,
             reader,
             writer: Arc::new(RwLock::new(Some(writer))),

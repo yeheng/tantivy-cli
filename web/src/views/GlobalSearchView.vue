@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { Listbox, ListboxButton, ListboxOption, ListboxOptions, Disclosure, DisclosureButton, DisclosurePanel } from '@headlessui/vue'
+import { FwbAccordion, FwbAccordionContent, FwbAccordionHeader, FwbAccordionPanel, FwbDropdown } from 'flowbite-vue'
 import { ChevronDownIcon, MagnifyingGlassIcon } from '@heroicons/vue/24/outline'
 import SearchBar from '../components/SearchBar.vue'
 import SearchResult from '../components/SearchResult.vue'
@@ -43,6 +43,10 @@ async function onSearch() {
     searchLoading.value = false
   }
 }
+
+function selectIndex(name) {
+  selectedIndex.value = name
+}
 </script>
 
 <template>
@@ -60,40 +64,41 @@ async function onSearch() {
           @search="onSearch"
         />
         <div class="flex justify-center">
-          <div class="relative">
-            <Listbox v-model="selectedIndex">
-              <ListboxButton class="inline-flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+          <FwbDropdown close-inside>
+            <template #trigger>
+              <button class="inline-flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
                 {{ selectedIndex || 'All Indexes' }}
                 <ChevronDownIcon class="w-4 h-4" />
-              </ListboxButton>
-              <ListboxOptions class="absolute mt-1 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 py-1 z-10">
-                <ListboxOption :value="null" v-slot="{ active, selected }">
-                  <div :class="[active && 'bg-sky-50 dark:bg-sky-900/30', 'px-3 py-1.5 text-sm cursor-pointer', selected && 'font-medium text-sky-700 dark:text-sky-400']">All Indexes</div>
-                </ListboxOption>
-                <ListboxOption v-for="name in indexOptions" :key="name" :value="name" v-slot="{ active, selected }">
-                  <div :class="[active && 'bg-sky-50 dark:bg-sky-900/30', 'px-3 py-1.5 text-sm cursor-pointer', selected && 'font-medium text-sky-700 dark:text-sky-400']">{{ name }}</div>
-                </ListboxOption>
-              </ListboxOptions>
-            </Listbox>
-          </div>
+              </button>
+            </template>
+            <div @click="selectIndex(null)" class="px-4 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-200">
+              All Indexes
+            </div>
+            <div v-for="name in indexOptions" :key="name" @click="selectIndex(name)" class="px-4 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-200">
+              {{ name }}
+            </div>
+          </FwbDropdown>
         </div>
       </div>
     </div>
     <div v-if="results.length" class="space-y-6">
-      <Disclosure v-for="group in results" :key="group.name" :default-open="true" v-slot="{ open }">
-        <div class="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700">
-          <DisclosureButton class="flex items-center justify-between w-full px-5 py-3">
-            <div class="flex items-center gap-2">
-              <span class="text-sm font-semibold text-gray-900 dark:text-gray-100">{{ group.name }}</span>
-              <span class="text-xs text-gray-400 dark:text-gray-500">{{ group.result.total }} results</span>
-            </div>
-            <ChevronDownIcon :class="['w-4 h-4 text-gray-400 transition-transform', open && 'rotate-180']" />
-          </DisclosureButton>
-          <DisclosurePanel class="px-5 pb-4 space-y-2">
-            <SearchResult v-for="(hit, i) in group.result.hits" :key="i" :hit="hit" :index="i" :rank="i + 1" />
-          </DisclosurePanel>
-        </div>
-      </Disclosure>
+      <div v-for="group in results" :key="group.name" class="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700">
+        <FwbAccordion>
+          <FwbAccordionPanel>
+            <FwbAccordionHeader>
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-semibold">{{ group.name }}</span>
+                <span class="text-xs text-gray-400">{{ group.result.total }} results</span>
+              </div>
+            </FwbAccordionHeader>
+            <FwbAccordionContent>
+              <div class="space-y-2">
+                <SearchResult v-for="(hit, i) in group.result.hits" :key="i" :hit="hit" :index="i" :rank="i + 1" />
+              </div>
+            </FwbAccordionContent>
+          </FwbAccordionPanel>
+        </FwbAccordion>
+      </div>
     </div>
   </div>
 </template>

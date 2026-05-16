@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tantivy::query::{AllQuery, BooleanQuery, ConstScoreQuery, Occur, QueryParser, RangeQuery, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, ConstScoreQuery, Occur, QueryParser, RangeQuery, RegexQuery, TermQuery};
 use tantivy::schema::IndexRecordOption;
 
 use crate::error::{AppError, Result};
@@ -103,6 +103,26 @@ pub fn build_es_query(handle: &IndexHandle, q: &EsQuery) -> Result<Box<dyn tanti
             if handle.text_fields.is_empty() {
                 return Err(AppError::Schema("no text fields to search".to_string()));
             }
+
+            // Simple prefix query: turn it into a RegexQuery across all text fields
+            let trimmed = qstr.trim();
+            if trimmed.ends_with('*')
+                && !trimmed[..trimmed.len() - 1].contains('*')
+                && !trimmed.contains(' ')
+            {
+                let prefix = &trimmed[..trimmed.len() - 1];
+                if !prefix.is_empty() {
+                    let pattern = format!("{}.*", regex::escape(prefix));
+                    let mut subqueries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+                    for field in &handle.text_fields {
+                        let regex_query = RegexQuery::from_pattern(&pattern, *field)
+                            .map_err(|e| AppError::Query(e.to_string()))?;
+                        subqueries.push((Occur::Should, Box::new(regex_query)));
+                    }
+                    return Ok(Box::new(BooleanQuery::new(subqueries)));
+                }
+            }
+
             let query_parser = QueryParser::for_index(&handle.index, handle.text_fields.clone());
             let parsed = query_parser
                 .parse_query(qstr)

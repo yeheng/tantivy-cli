@@ -18,7 +18,9 @@ export default api
 // Index operations
 export async function listIndexes() {
   const { data } = await api.get('/indexes')
-  return data
+  if (Array.isArray(data)) return data
+  if (Array.isArray(data?.indexes)) return data.indexes
+  return []
 }
 
 export async function createIndex(name, schema) {

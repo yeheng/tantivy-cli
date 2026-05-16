@@ -1,6 +1,5 @@
 <script setup>
-import { Disclosure, DisclosureButton, DisclosurePanel } from '@headlessui/vue'
-import { ChevronDownIcon } from '@heroicons/vue/24/outline'
+import { FwbAccordion, FwbAccordionContent, FwbAccordionHeader, FwbAccordionPanel } from 'flowbite-vue'
 
 defineProps({
   hit: { type: Object, required: true },
@@ -27,14 +26,13 @@ defineProps({
         <span class="text-gray-700 dark:text-gray-300" v-html="Array.isArray(text) ? text.join(' ... ') : text" />
       </div>
     </div>
-    <Disclosure class="mt-2" v-slot="{ open }">
-      <DisclosureButton class="flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300">
-        <ChevronDownIcon :class="['w-3 h-3 transition-transform', open && 'rotate-180']" />
-        Raw JSON
-      </DisclosureButton>
-      <DisclosurePanel class="mt-1">
-        <pre class="text-xs text-gray-600 dark:text-gray-400 overflow-x-auto bg-white dark:bg-gray-900 rounded p-2">{{ JSON.stringify(hit.doc, null, 2) }}</pre>
-      </DisclosurePanel>
-    </Disclosure>
+    <FwbAccordion :collapsed="true">
+      <FwbAccordionPanel>
+        <FwbAccordionHeader>Raw JSON</FwbAccordionHeader>
+        <FwbAccordionContent>
+          <pre class="text-xs text-gray-600 dark:text-gray-400 overflow-x-auto bg-white dark:bg-gray-900 rounded p-2">{{ JSON.stringify(hit.doc, null, 2) }}</pre>
+        </FwbAccordionContent>
+      </FwbAccordionPanel>
+    </FwbAccordion>
   </div>
 </template>
